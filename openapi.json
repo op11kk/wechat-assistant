@@ -1,0 +1,676 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "iosbehind Sensor API",
+    "version": "1.0.0",
+    "description": "传感器数据上传与 session 管理。SUPABASE_URL / SUPABASE_KEY 须通过环境变量或项目根目录 .env 提供（见 .env.example）。若设置 API_SECRET，则除 GET /health 外所有接口需在 Header 中携带 Bearer 或 X-API-Key。"
+  },
+  "servers": [{ "url": "http://localhost:5000", "description": "本地开发" }],
+  "tags": [
+    { "name": "meta", "description": "健康检查与契约" },
+    { "name": "ingest", "description": "数据写入" },
+    { "name": "sessions", "description": "会话查询与删除" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "与 API_SECRET 相同的令牌"
+      },
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "与 API_SECRET 相同的令牌"
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "type": "string", "example": "ok" } }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "detail": { "type": "string" },
+          "hint": { "type": "string" }
+        }
+      },
+      "SensorSample": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "session_id": { "type": "string" },
+          "sensor_type": { "type": "string" },
+          "x": { "type": "number", "format": "double", "nullable": true },
+          "y": { "type": "number", "format": "double", "nullable": true },
+          "z": { "type": "number", "format": "double", "nullable": true },
+          "timestamp": { "type": "string", "description": "ISO8601 时间字符串" },
+          "created_at": { "type": "string" }
+        }
+      },
+      "TimestamptzInput": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "ISO8601 墙钟时间"
+          },
+          {
+            "type": "number",
+            "description": "Unix 纪元秒；若 >1e12 服务端按毫秒折算"
+          }
+        ]
+      },
+      "SensorSampleInput": {
+        "type": "object",
+        "required": ["session_id", "sensor_type", "x", "y", "z", "timestamp"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "sensor_type": { "type": "string" },
+          "x": { "type": "number", "format": "double" },
+          "y": { "type": "number", "format": "double" },
+          "z": { "type": "number", "format": "double" },
+          "timestamp": {
+            "allOf": [{ "$ref": "#/components/schemas/TimestamptzInput" }],
+            "description": "绝对时间用 ISO 或 Unix；若 timestamp_is_elapsed=true 则须为数字（相对 session.start_time 的秒）"
+          },
+          "timestamp_is_elapsed": {
+            "type": "boolean",
+            "description": "true 时 timestamp 为相对 sessions.start_time 的秒数（如 CACurrentMediaTime 与录制起点之差，在墙钟对齐时等价于流逝秒数）"
+          }
+        }
+      },
+      "UploadSensorResponse": {
+        "type": "object",
+        "required": ["message", "id"],
+        "properties": {
+          "message": { "type": "string" },
+          "id": { "type": "integer", "format": "int64" }
+        }
+      },
+      "BatchUploadBody": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 500,
+            "items": { "$ref": "#/components/schemas/SensorSampleInput" }
+          },
+          "timestamp_is_elapsed": {
+            "type": "boolean",
+            "description": "整批默认：为 true 时各条 timestamp 为相对 session.start_time 的秒数。若某条 items[] 自带 timestamp_is_elapsed，则以该条为准。"
+          }
+        }
+      },
+      "BatchUploadResponse": {
+        "type": "object",
+        "required": ["message", "count", "ids"],
+        "properties": {
+          "message": { "type": "string" },
+          "count": { "type": "integer" },
+          "ids": {
+            "type": "array",
+            "items": { "type": "integer", "format": "int64" }
+          }
+        }
+      },
+      "SessionRow": {
+        "type": "object",
+        "description": "sessions 表一行；id 为 BIGSERIAL，业务外键为 session_id",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "session_id": { "type": "string" },
+          "user_selected_mode": { "type": "string" },
+          "capture_mode": { "type": "string" },
+          "device_model": { "type": "string", "nullable": true },
+          "ios_version": { "type": "string", "nullable": true },
+          "app_version": { "type": "string", "nullable": true },
+          "start_time": { "type": "string" },
+          "end_time": { "type": "string", "nullable": true },
+          "duration_ms": { "type": "integer", "nullable": true },
+          "total_rgb_frames": { "type": "integer", "nullable": true },
+          "total_pose_samples": { "type": "integer", "nullable": true },
+          "total_imu_samples": { "type": "integer", "nullable": true },
+          "total_depth_frames": { "type": "integer", "nullable": true },
+          "upload_status": { "type": "string" },
+          "created_at": { "type": "string" }
+        }
+      },
+      "SessionStats": {
+        "type": "object",
+        "description": "视图 session_stats：SessionRow 列 + 采样聚合",
+        "allOf": [
+          { "$ref": "#/components/schemas/SessionRow" },
+          {
+            "type": "object",
+            "properties": {
+              "sample_count": { "type": "integer", "format": "int64" },
+              "first_timestamp": { "type": "string", "nullable": true },
+              "last_timestamp": { "type": "string", "nullable": true }
+            }
+          }
+        ]
+      },
+      "CreateSessionBody": {
+        "type": "object",
+        "required": ["session_id", "user_selected_mode", "capture_mode", "start_time"],
+        "properties": {
+          "session_id": { "type": "string", "description": "与 sensor_data.session_id 相同" },
+          "user_selected_mode": { "type": "string", "example": "Lite" },
+          "capture_mode": { "type": "string" },
+          "start_time": { "$ref": "#/components/schemas/TimestamptzInput" },
+          "device_model": { "type": "string" },
+          "ios_version": { "type": "string" },
+          "app_version": { "type": "string" },
+          "end_time": { "$ref": "#/components/schemas/TimestamptzInput" },
+          "duration_ms": { "type": "integer" },
+          "total_rgb_frames": { "type": "integer" },
+          "total_pose_samples": { "type": "integer" },
+          "total_imu_samples": { "type": "integer" },
+          "total_depth_frames": { "type": "integer" },
+          "upload_status": { "type": "string" }
+        }
+      },
+      "CreateSessionResponse": {
+        "type": "object",
+        "required": ["message", "session"],
+        "properties": {
+          "message": { "type": "string" },
+          "session": { "$ref": "#/components/schemas/SessionRow" }
+        }
+      },
+      "PatchSessionBody": {
+        "type": "object",
+        "description": "部分更新 sessions；至少提供一个字段",
+        "properties": {
+          "user_selected_mode": { "type": "string" },
+          "capture_mode": { "type": "string" },
+          "device_model": { "type": "string" },
+          "ios_version": { "type": "string" },
+          "app_version": { "type": "string" },
+          "start_time": { "$ref": "#/components/schemas/TimestamptzInput" },
+          "end_time": { "$ref": "#/components/schemas/TimestamptzInput" },
+          "duration_ms": { "type": "integer" },
+          "total_rgb_frames": { "type": "integer" },
+          "total_pose_samples": { "type": "integer" },
+          "total_imu_samples": { "type": "integer" },
+          "total_depth_frames": { "type": "integer" },
+          "upload_status": { "type": "string" }
+        }
+      },
+      "UpdateSessionResponse": {
+        "type": "object",
+        "required": ["message", "session"],
+        "properties": {
+          "message": { "type": "string" },
+          "session": { "$ref": "#/components/schemas/SessionRow" }
+        }
+      },
+      "SessionsListResponse": {
+        "type": "object",
+        "required": ["sessions"],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SessionStats" }
+          }
+        }
+      },
+      "SessionSamplesResponse": {
+        "type": "object",
+        "required": ["session_id", "items", "count", "has_more"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SensorSample" }
+          },
+          "count": { "type": "integer" },
+          "next_cursor": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "有下一页时等于本页最后一条的 id，作为 after_id 传入"
+          },
+          "has_more": { "type": "boolean" }
+        }
+      },
+      "DeleteSessionResponse": {
+        "type": "object",
+        "required": ["message", "session_id"],
+        "properties": {
+          "message": { "type": "string" },
+          "session_id": { "type": "string", "description": "已删除的 sessions.session_id（TEXT）" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "健康检查",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "OpenAPI 契约（JSON）",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 文档",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "契约文件缺失",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload_sensor": {
+      "post": {
+        "tags": ["ingest"],
+        "summary": "单条上传传感器数据（session 须已存在）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SensorSampleInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UploadSensorResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权（已启用 API_SECRET 时）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "session 未注册",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload_sensor_batch": {
+      "post": {
+        "tags": ["ingest"],
+        "summary": "批量上传（同一批须同一 session_id，且会话须已存在）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BatchUploadBody" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BatchUploadResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "session 未注册",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions": {
+      "post": {
+        "tags": ["sessions"],
+        "summary": "注册会话（写入 sessions 表）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateSessionBody" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CreateSessionResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "409": {
+            "description": "会话 id 已存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "写入失败（列名不匹配等）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["sessions"],
+        "summary": "Session 列表（视图 session_stats：sessions + 采样聚合）",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionsListResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "视图未创建或服务异常",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/samples": {
+      "get": {
+        "tags": ["sessions"],
+        "summary": "分页拉取某 session 采样点（会话须已存在）",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "路径中可含 URL 编码字符"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 500, "maximum": 5000 }
+          },
+          {
+            "name": "after_id",
+            "in": "query",
+            "schema": { "type": "integer", "format": "int64" },
+            "description": "上一页返回的 next_cursor"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "仅 timestamp >= since"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionSamplesResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "会话不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "查询失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}": {
+      "patch": {
+        "tags": ["sessions"],
+        "summary": "按 session_id（TEXT）部分更新会话元数据",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "sessions.session_id，非 BIGSERIAL id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PatchSessionBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UpdateSessionResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "会话不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "更新失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["sessions"],
+        "summary": "按 session_id（TEXT）删除 sessions 行（建议外键 ON DELETE CASCADE 级联删 sensor_data）",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DeleteSessionResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未授权",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "会话不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "删除失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }, { "ApiKeyAuth": [] }]
+}
