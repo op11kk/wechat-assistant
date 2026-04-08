@@ -6,7 +6,7 @@ iosbehind — Flask HTTP 网关，业务数据经 Supabase 写入 Postgres。
 产品：微信服务号视频数据收集（participants / video_submissions），见 docs/04_data_spec.md。
 对象存储：**腾讯云 COS**（见 docs/05_sync_storage.md）。
 
-- 可选 API_SECRET：除 GET /health、CORS 预检、GET|POST /wechat/callback 外需 Bearer 或 X-API-Key。
+- 可选 API_SECRET：除 GET /health、GET|HEAD /h5*、CORS 预检、GET|POST /wechat/callback 外需 Bearer 或 X-API-Key。
 - 微信明文回调：配置 WECHAT_TOKEN；临时素材拉取需 WECHAT_APP_ID、WECHAT_APP_SECRET；安全模式加解密需自行扩展。
 """
 
@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import warnings
 import threading
 import time
 import urllib.error
@@ -27,7 +28,7 @@ from typing import Any, Optional
 from xml.etree.ElementTree import Element
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
@@ -38,15 +39,39 @@ from supabase import Client, create_client
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_JSON = BASE_DIR / "openapi.json"
-load_dotenv(BASE_DIR / ".env")
+# 与 iosopen 对齐：web/h5/index.html 为上传页；静态资源同目录下相对路径
+H5_ROOT = BASE_DIR / "web" / "h5"
+H5_INDEX = H5_ROOT / "index.html"
+# 默认 dotenv 不覆盖已有环境变量；若系统/终端里残留旧 SUPABASE_URL，会导致连错库。
+load_dotenv(BASE_DIR / ".env", override=True)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
+if SUPABASE_KEY.startswith("sb_publishable_"):
+    warnings.warn(
+        "SUPABASE_KEY 当前为 publishable，服务端写库应使用 Project Settings → API 里的 "
+        "service_role（secret），不要用 publishable。",
+        UserWarning,
+        stacklevel=1,
+    )
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError(
         "缺少 SUPABASE_URL 或 SUPABASE_KEY。请复制 .env.example 为 .env 并填写，或导出对应环境变量。"
     )
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def _supabase_project_ref(url: str) -> Optional[str]:
+    """从 SUPABASE_URL 解析项目 ref，例如 https://xxx.supabase.co → xxx。"""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        suf = ".supabase.co"
+        if host.endswith(suf):
+            return host[: -len(suf)] or None
+    except Exception:
+        pass
+    return None
+
 
 API_SECRET = os.getenv("API_SECRET", "").strip()
 WECHAT_TOKEN = (os.getenv("WECHAT_TOKEN") or "").strip()
@@ -212,6 +237,10 @@ def enforce_api_auth():
         return None
     if request.path == "/wechat/callback":
         return None
+    # 浏览器打开 H5 无法带 Authorization；静态资源走 GET/HEAD /h5 前缀
+    _p = request.path
+    if request.method in ("GET", "HEAD") and (_p == "/h5" or _p.startswith("/h5/")):
+        return None
     if not API_SECRET:
         return None
     token = _extract_bearer_or_api_key()
@@ -235,7 +264,21 @@ def enforce_api_auth():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    # 供运维/前端探测：本仓库仅接 Supabase，无内置 sqlite 路径
+    ref = _supabase_project_ref(SUPABASE_URL)
+    payload: dict[str, Any] = {"status": "ok", "db": "supabase"}
+    if ref:
+        payload["supabase_ref"] = ref
+    # 本地排障：.env 设 IOSBEHIND_DIAG=1 后重启，可确认是否连错目录/进程
+    if os.getenv("IOSBEHIND_DIAG", "").strip().lower() in ("1", "true", "yes"):
+        payload["diag"] = {
+            "app_py": str(Path(__file__).resolve()),
+            "env_file": str((BASE_DIR / ".env").resolve()),
+            "env_exists": (BASE_DIR / ".env").is_file(),
+            "cwd": os.getcwd(),
+            "supabase_host": urllib.parse.urlparse(SUPABASE_URL).hostname,
+        }
+    return jsonify(payload)
 
 
 @app.route("/openapi.json", methods=["GET"])
@@ -245,6 +288,42 @@ def openapi_spec():
     with OPENAPI_JSON.open(encoding="utf-8") as f:
         spec = json.load(f)
     return jsonify(spec)
+
+
+@app.route("/h5", methods=["GET", "HEAD"])
+@app.route("/h5/", methods=["GET", "HEAD"])
+def h5_upload_page():
+    """H5 大视频上传页（与 iosopen 行为一致；不受 API_SECRET 拦截）。"""
+    if not H5_INDEX.is_file():
+        return (
+            jsonify(
+                {
+                    "error": "H5 page not found",
+                    "hint": "在仓库根目录放置 web/h5/index.html（可从 iosopen 复制 web/h5）",
+                }
+            ),
+            404,
+        )
+    resp = send_file(H5_INDEX, mimetype="text/html; charset=utf-8")
+    resp.headers["X-Video-Collector-H5"] = "1"
+    return resp
+
+
+@app.route("/h5/<path:subpath>", methods=["GET", "HEAD"])
+def h5_static(subpath: str):
+    """/h5 下的 js/css 等静态资源。"""
+    if not H5_ROOT.is_dir():
+        return jsonify({"error": "H5 page not found"}), 404
+    if ".." in subpath or subpath.startswith(("/", "\\")):
+        return jsonify({"error": "invalid path"}), 400
+    target = (H5_ROOT / subpath).resolve()
+    try:
+        target.relative_to(H5_ROOT.resolve())
+    except ValueError:
+        return jsonify({"error": "invalid path"}), 400
+    if not target.is_file():
+        return jsonify({"error": "not found"}), 404
+    return send_from_directory(H5_ROOT, subpath)
 
 
 # ---------------------------------------------------------------------------
@@ -261,31 +340,31 @@ def _xml_text(el: Optional[Element]) -> Optional[str]:
 
 def _insert_video_submission_row(
     row: dict[str, Any],
-) -> tuple[str, Optional[dict]]:
+) -> tuple[str, Optional[dict], Optional[str]]:
     """
     写入 video_submissions。
-    返回 ("inserted", 行字典) | ("duplicate", None) | ("error", None)。
+    返回 ("inserted", 行, None) | ("duplicate", None, None) | ("error", None, 错误说明)。
     """
     try:
         result = supabase.table("video_submissions").insert(row).execute()
         ins = result.data or []
         if not ins:
-            return "error", None
+            return "error", None, "Insert returned no row"
         app.logger.info(
             "video_submission inserted id=%s source=%s",
             ins[0].get("id"),
             row.get("source"),
         )
-        return "inserted", ins[0]
+        return "inserted", ins[0], None
     except APIError as e:
         err_s = str(e).lower()
         if "duplicate" in err_s or "unique" in err_s or "23505" in err_s:
             app.logger.info(
                 "video_submission dedupe wechat_media_id=%s", row.get("wechat_media_id")
             )
-            return "duplicate", None
+            return "duplicate", None, None
         app.logger.error("video_submission insert: %s", e)
-        return "error", None
+        return "error", None, str(e)
 
 
 def _ingest_chat_video_wechat(
@@ -319,7 +398,7 @@ def _ingest_chat_video_wechat(
         "user_comment": user_comment,
         "review_status": "pending",
     }
-    status, ins_row = _insert_video_submission_row(row)
+    status, ins_row, _ins_err = _insert_video_submission_row(row)
     if status == "error":
         app.logger.error("chat video insert failed (see log for APIError)")
         return
@@ -517,7 +596,15 @@ def upload_presign():
         .execute()
     )
     if not pr.data:
-        return jsonify({"error": "Participant mismatch"}), 404
+        return (
+            jsonify(
+                {
+                    "error": "Participant mismatch",
+                    "detail": "数据库中不存在该 participant_code 与 wechat_openid 的组合，请先 POST /participants 登记",
+                }
+            ),
+            404,
+        )
     content_type = str(data.get("content_type") or "video/mp4").strip() or "video/mp4"
     key = f"uploads/{code}/h5/{uuid.uuid4().hex}.mp4"
     expires = 600
@@ -563,27 +650,8 @@ def upload_complete():
     object_key = str(data["object_key"]).strip()
     if source not in ("chat", "h5"):
         return jsonify({"error": "source must be chat or h5"}), 400
-    pr = (
-        supabase.table("participants")
-        .select("id")
-        .eq("participant_code", code)
-        .eq("wechat_openid", oid)
-        .limit(1)
-        .execute()
-    )
-    if not pr.data:
-        return (
-            jsonify(
-                {
-                    "error": "Participant mismatch",
-                    "detail": "No row for this participant_code and wechat_openid",
-                }
-            ),
-            404,
-        )
-    participant_id = pr.data[0]["id"]
     row: dict = {
-        "participant_id": participant_id,
+        "participant_id": 0,
         "participant_code": code,
         "source": source,
         "object_key": object_key,
@@ -600,35 +668,69 @@ def upload_complete():
             row["size_bytes"] = int(row["size_bytes"])
         except (TypeError, ValueError):
             return jsonify({"error": "size_bytes must be integer"}), 400
-    status, submission = _insert_video_submission_row(row)
-    if status == "error":
-        return jsonify({"error": "Failed to insert submission"}), 500
-    if status == "inserted" and submission is not None:
-        return jsonify({"message": "ok", "submission": submission}), 201
-    if status == "duplicate":
-        if row.get("wechat_media_id"):
-            r = (
-                supabase.table("video_submissions")
-                .select("*")
-                .eq("wechat_media_id", row["wechat_media_id"])
-                .limit(1)
-                .execute()
+    try:
+        pr = (
+            supabase.table("participants")
+            .select("id")
+            .eq("participant_code", code)
+            .eq("wechat_openid", oid)
+            .limit(1)
+            .execute()
+        )
+        if not pr.data:
+            return (
+                jsonify(
+                    {
+                        "error": "Participant mismatch",
+                        "detail": "No row for this participant_code and wechat_openid",
+                    }
+                ),
+                404,
             )
-        else:
-            r = (
-                supabase.table("video_submissions")
-                .select("*")
-                .eq("participant_id", participant_id)
-                .eq("object_key", object_key)
-                .limit(1)
-                .execute()
+        participant_id = pr.data[0]["id"]
+        row["participant_id"] = participant_id
+        status, submission, insert_err = _insert_video_submission_row(row)
+        if status == "error":
+            return (
+                jsonify(
+                    {
+                        "error": "Failed to insert submission",
+                        "detail": insert_err or "unknown",
+                    }
+                ),
+                500,
             )
-        if r.data:
-            return jsonify(
-                {"message": "ok", "submission": r.data[0], "deduplicated": True}
-            ), 200
-        return jsonify({"message": "ok", "deduplicated": True}), 200
-    return jsonify({"error": "Unexpected insert state"}), 500
+        if status == "inserted" and submission is not None:
+            return jsonify({"message": "ok", "submission": submission}), 201
+        if status == "duplicate":
+            if row.get("wechat_media_id"):
+                r = (
+                    supabase.table("video_submissions")
+                    .select("*")
+                    .eq("wechat_media_id", row["wechat_media_id"])
+                    .limit(1)
+                    .execute()
+                )
+            else:
+                r = (
+                    supabase.table("video_submissions")
+                    .select("*")
+                    .eq("participant_id", participant_id)
+                    .eq("object_key", object_key)
+                    .limit(1)
+                    .execute()
+                )
+            if r.data:
+                return jsonify(
+                    {"message": "ok", "submission": r.data[0], "deduplicated": True}
+                ), 200
+            return jsonify({"message": "ok", "deduplicated": True}), 200
+        return jsonify({"error": "Unexpected insert state"}), 500
+    except APIError as e:
+        return jsonify({"error": "Supabase APIError", "detail": str(e)}), 500
+    except Exception as e:
+        app.logger.exception("upload/complete")
+        return jsonify({"error": "upload/complete failed", "detail": str(e)}), 500
 
 
 @app.route("/admin/submissions", methods=["GET"])
@@ -684,4 +786,30 @@ def admin_patch_submission(submission_id: int):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    _ref = _supabase_project_ref(SUPABASE_URL)
+    _host = urllib.parse.urlparse(SUPABASE_URL).hostname or "?"
+    try:
+        _port = int((os.getenv("FLASK_PORT") or os.getenv("PORT") or "5000").strip())
+    except ValueError:
+        _port = 5000
+    # debug 关则不会启 reloader；debug 开时可用 FLASK_USE_RELOADER=0 关掉热重载子进程
+    _flask_debug = os.getenv("FLASK_DEBUG", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    _reload = _flask_debug and (
+        os.getenv("FLASK_USE_RELOADER", "1").strip().lower() not in ("0", "false", "no", "off")
+    )
+    print(
+        f"[iosbehind] 监听端口 {_port}；若与 curl /health 不一致，说明该端口上不是本进程或读错 .env\n"
+        f"  app.py={Path(__file__).resolve()}\n"
+        f"  env_file={(BASE_DIR / '.env').resolve()}  exists={(BASE_DIR / '.env').is_file()}\n"
+        f"  supabase_host={_host!r}  supabase_ref={_ref!r}\n"
+        f"  FLASK_DEBUG={_flask_debug}  use_reloader={_reload}\n"
+        "  netstat 若仍有两个 LISTENING：先 taskkill /IM python.exe /F 清干净再启动；仍不行设 FLASK_DEBUG=0\n"
+        f"  -> curl http://127.0.0.1:{_port}/health",
+        flush=True,
+    )
+    app.run(host="0.0.0.0", port=_port, debug=_flask_debug, use_reloader=_reload)

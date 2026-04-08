@@ -28,8 +28,19 @@
     "schemas": {
       "HealthResponse": {
         "type": "object",
-        "required": ["status"],
-        "properties": { "status": { "type": "string", "example": "ok" } }
+        "required": ["status", "db"],
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "db": {
+            "type": "string",
+            "enum": ["supabase", "sqlite"],
+            "description": "本仓库实现为 supabase；sqlite 仅预留与其它部署对齐"
+          },
+          "supabase_ref": {
+            "type": "string",
+            "description": "由 SUPABASE_URL 解析出的项目 ref，用于核对是否连对库"
+          }
+        }
       },
       "ErrorResponse": {
         "type": "object",

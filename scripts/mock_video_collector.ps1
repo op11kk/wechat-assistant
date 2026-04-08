@@ -1,9 +1,15 @@
-# 视频收集 API 联调（PowerShell）。先执行 schema_video_collector.sql，再 python app.py
-# 仓库根目录: .\scripts\mock_video_collector.ps1
-# 若启用 API_SECRET:  $env:API_SECRET = '<与 .env 一致>'
+# Video collector API smoke test. Run from repo root: .\scripts\mock_video_collector.ps1
+# Requires: schema_video_collector.sql, python app.py
+# If API_SECRET set in .env, run: $env:API_SECRET='<same as .env>'
 
 $ErrorActionPreference = "Stop"
-$Base = if ($env:BASE) { $env:BASE } else { "http://127.0.0.1:5000" }
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$DefaultPort = "5000"
+if (Test-Path (Join-Path $PSScriptRoot "..\.env")) {
+    $lp = Select-String -Path (Join-Path $PSScriptRoot "..\.env") -Pattern '^FLASK_PORT=' | Select-Object -First 1
+    if ($lp) { $DefaultPort = ($lp.Line -replace '^FLASK_PORT=', '').Trim() }
+}
+$Base = if ($env:BASE) { $env:BASE } else { "http://127.0.0.1:$DefaultPort" }
 $OpenId = if ($env:MOCK_OPENID) { $env:MOCK_OPENID } else { "oMock-{0}-{1}" -f (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss"), (Get-Random) }
 
 $Headers = @{ "Content-Type" = "application/json" }
@@ -16,6 +22,27 @@ function Get-CurlAuthArgs {
     return @()
 }
 
+# PS 7+ 常把 4xx/5xx 正文放在 ErrorDetails；PS 5.1 多在 Response 流里
+function Read-WebErrorBody {
+    param([System.Management.Automation.ErrorRecord]$Err)
+    if ($Err.ErrorDetails -and $Err.ErrorDetails.Message) {
+        return $Err.ErrorDetails.Message
+    }
+    $resp = $Err.Exception.Response
+    if ($resp -and $resp.GetResponseStream) {
+        try {
+            $stream = $resp.GetResponseStream()
+            if ($stream) {
+                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                $txt = $reader.ReadToEnd()
+                $reader.Dispose()
+                if ($txt) { return $txt }
+            }
+        } catch { }
+    }
+    return $Err.Exception.Message
+}
+
 function Invoke-Json {
     param([string]$Method, [string]$Uri, $Body = $null)
     $params = @{ Uri = $Uri; Method = $Method; Headers = $Headers }
@@ -25,12 +52,12 @@ function Invoke-Json {
         Write-Host "HTTP $($r.StatusCode)"
         if ($r.Content) { $r.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10 }
     } catch {
-        $resp = $_.Exception.Response
-        if ($resp) {
-            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-            Write-Host "HTTP $([int]$resp.StatusCode)"
-            Write-Host $reader.ReadToEnd()
-        } else { throw $_ }
+        $status = $null
+        try {
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        } catch { }
+        Write-Host $(if ($null -ne $status) { "HTTP $status" } else { "HTTP (error)" })
+        Write-Host (Read-WebErrorBody $_)
     }
 }
 
@@ -46,24 +73,86 @@ $reg = @{
     real_name     = "MockUser"
     phone         = "13800138000"
 }
-Invoke-Json POST "$Base/participants" $reg
-Write-Host ""
+$code = $null
+try {
+    $regJson = $reg | ConvertTo-Json -Compress
+    $pr = Invoke-WebRequest -Uri "$Base/participants" -Method POST -Headers $Headers -Body $regJson -UseBasicParsing
+    Write-Host "HTTP $($pr.StatusCode)"
+    $regObj = $pr.Content | ConvertFrom-Json
+    $regObj | ConvertTo-Json -Depth 10
+    $code = $regObj.participant.participant_code
+} catch {
+    $resp = $_.Exception.Response
+    if ($resp -and [int]$resp.StatusCode -eq 409) {
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $body = $reader.ReadToEnd()
+        Write-Host "HTTP 409 (exists)"
+        Write-Host $body
+        $regObj = $body | ConvertFrom-Json
+        if ($regObj.participant) { $code = $regObj.participant.participant_code }
+    } else {
+        if ($resp) {
+            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            Write-Host "HTTP $([int]$resp.StatusCode)"
+            Write-Host $reader.ReadToEnd()
+        } else { throw $_ }
+    }
+}
+if (-not $code) {
+    Write-Host "==> GET /participants/by_openid (resolve code)"
+    try {
+        $g = Invoke-WebRequest -Uri "$Base/participants/by_openid?wechat_openid=$([Uri]::EscapeDataString($OpenId))" -Headers $Headers -UseBasicParsing
+        $go = $g.Content | ConvertFrom-Json
+        $code = $go.participant.participant_code
+        Write-Host "HTTP $($g.StatusCode)"
+        $go | ConvertTo-Json -Depth 10
+    } catch {
+        Write-Host "Could not resolve participant_code. Stop."
+        exit 1
+    }
+}
+if ($env:MOCK_CODE) { $code = $env:MOCK_CODE }
+Write-Host "`n==> Using participant_code=$code"
 
 Write-Host "==> GET /participants/by_openid"
 & curl.exe -sS @(Get-CurlAuthArgs) "$Base/participants/by_openid?wechat_openid=$([Uri]::EscapeDataString($OpenId))"
 Write-Host "`n"
 
-$code = if ($env:MOCK_CODE) { $env:MOCK_CODE } else { "000001" }
-Write-Host "==> POST /upload/complete (participant_code=$code，请按上一步返回的 participant_code 设置 MOCK_CODE)"
-$sub = @{
+Write-Host "==> POST /upload/presign"
+$presignBody = @{
     participant_code = $code
     wechat_openid   = $OpenId
+    content_type    = "video/mp4"
+}
+$objectKeyFromPresign = $null
+try {
+    $pb = $presignBody | ConvertTo-Json -Compress
+    $prSign = Invoke-WebRequest -Uri "$Base/upload/presign" -Method POST -Headers $Headers -Body $pb -UseBasicParsing
+    Write-Host "HTTP $($prSign.StatusCode)"
+    $presignObj = $prSign.Content | ConvertFrom-Json
+    $presignObj | ConvertTo-Json -Depth 10
+    $objectKeyFromPresign = $presignObj.object_key
+} catch {
+    $resp = $_.Exception.Response
+    if ($resp) {
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        Write-Host "HTTP $([int]$resp.StatusCode)"
+        Write-Host $reader.ReadToEnd()
+    } else { throw $_ }
+}
+Write-Host ""
+
+Write-Host "==> POST /upload/complete"
+$okKey = if ($objectKeyFromPresign) { $objectKeyFromPresign } else { "uploads/$code/mock-$(Get-Random).mp4" }
+$sub = @{
+    participant_code = [string]$code
+    wechat_openid   = $OpenId
     source          = "h5"
-    object_key      = "uploads/$code/mock-$(Get-Random).mp4"
+    object_key      = [string]$okKey
     file_name       = "mock.mp4"
     size_bytes      = 1024
     mime            = "video/mp4"
-    user_comment    = "$code+视频1"
+    user_comment    = "$code+video1"
 }
 Invoke-Json POST "$Base/upload/complete" $sub
 Write-Host ""
@@ -72,4 +161,6 @@ Write-Host "==> GET /admin/submissions"
 & curl.exe -sS @(Get-CurlAuthArgs) "$Base/admin/submissions?limit=10"
 Write-Host "`n"
 
-Write-Host "Done. 404/找不到参与者: 把 MOCK_CODE 设为 POST /participants 返回的 participant_code。401: 设置 `$env:API_SECRET"
+Write-Host "Done. 401: set `$env:API_SECRET to match .env. 503 presign: fill COS_* in .env and restart app."
+Write-Host "500 /upload/complete: read response JSON `"detail`" (often RLS: use service_role key in SUPABASE_KEY or relax policies)."
+Write-Host "BASE: 默认读 .env 的 FLASK_PORT；可覆盖：`$env:BASE='http://127.0.0.1:5001'"
