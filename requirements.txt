@@ -2,3 +2,4 @@ flask>=3.0
 flask-cors>=4.0
 supabase>=2.0
 python-dotenv>=1.0
+cos-python-sdk-v5>=1.9.31

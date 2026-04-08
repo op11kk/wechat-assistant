@@ -1,28 +1,39 @@
 from __future__ import annotations
 
 """
-iosbehind — Flask HTTP 网关，业务数据经 Supabase Python 客户端写入 Postgres。
+iosbehind — Flask HTTP 网关，业务数据经 Supabase 写入 Postgres。
 
-- 业务会话标识：sessions.session_id（TEXT，与 iOS UUID 一致）；sessions.id 为表自增主键。
-- 传感器行：sensor_data.session_id 必须已存在于 sessions。
-- 可选 API_SECRET：除 GET /health 与 CORS 预检外需 Bearer 或 X-API-Key。
-- 时间：支持 ISO8601 与 Unix 秒/毫秒；可选 timestamp_is_elapsed 表示相对 sessions.start_time 的秒数。
+产品：微信服务号视频数据收集（participants / video_submissions），见 docs/04_data_spec.md。
+对象存储：**腾讯云 COS**（见 docs/05_sync_storage.md）。
+
+- 可选 API_SECRET：除 GET /health、CORS 预检、GET|POST /wechat/callback 外需 Bearer 或 X-API-Key。
+- 微信明文回调：配置 WECHAT_TOKEN；临时素材拉取需 WECHAT_APP_ID、WECHAT_APP_SECRET；安全模式加解密需自行扩展。
 """
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from supabase import create_client, Client
-from postgrest.exceptions import APIError
-from typing import Any, Optional
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+import hashlib
 import hmac
 import json
 import os
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+from xml.etree.ElementTree import Element
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from postgrest.exceptions import APIError
+from supabase import Client, create_client
 
 # ---------------------------------------------------------------------------
-# 配置：.env、Supabase 客户端、Flask 应用
+# 配置
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,18 +49,144 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 API_SECRET = os.getenv("API_SECRET", "").strip()
+WECHAT_TOKEN = (os.getenv("WECHAT_TOKEN") or "").strip()
+WECHAT_APP_ID = (os.getenv("WECHAT_APP_ID") or "").strip()
+WECHAT_APP_SECRET = (os.getenv("WECHAT_APP_SECRET") or "").strip()
+COS_SECRET_ID = (os.getenv("COS_SECRET_ID") or "").strip()
+COS_SECRET_KEY = (os.getenv("COS_SECRET_KEY") or "").strip()
+COS_REGION = (os.getenv("COS_REGION") or "").strip()
+COS_BUCKET = (os.getenv("COS_BUCKET") or "").strip()
+
+_wechat_token_lock = threading.Lock()
+_wechat_token_cache: dict[str, Any] = {"token": None, "deadline": 0.0}
+_cos_client_singleton: Any = None
+_cos_client_lock = threading.Lock()
 
 app = Flask(__name__)
-CORS(app)  # 浏览器跨域；真机 native 请求不依赖此项，但保留无害
+CORS(app)
+
+
+def _cos_env_ok() -> bool:
+    return bool(COS_SECRET_ID and COS_SECRET_KEY and COS_REGION and COS_BUCKET)
+
+
+def _wechat_media_api_ok() -> bool:
+    return bool(WECHAT_APP_ID and WECHAT_APP_SECRET)
+
+
+def _get_cos_client():
+    global _cos_client_singleton
+    if _cos_client_singleton is not None:
+        return _cos_client_singleton
+    with _cos_client_lock:
+        if _cos_client_singleton is None:
+            from qcloud_cos import CosConfig, CosS3Client
+
+            cfg = CosConfig(
+                Region=COS_REGION,
+                SecretId=COS_SECRET_ID,
+                SecretKey=COS_SECRET_KEY,
+                Scheme="https",
+            )
+            _cos_client_singleton = CosS3Client(cfg)
+    return _cos_client_singleton
+
+
+def _wechat_access_token() -> Optional[str]:
+    """带内存缓存的 client_credential access_token。"""
+    with _wechat_token_lock:
+        now = time.time()
+        tok = _wechat_token_cache["token"]
+        if tok and now < float(_wechat_token_cache["deadline"]):
+            return str(tok)
+        if not _wechat_media_api_ok():
+            return None
+        q = urllib.parse.urlencode(
+            {
+                "grant_type": "client_credential",
+                "appid": WECHAT_APP_ID,
+                "secret": WECHAT_APP_SECRET,
+            }
+        )
+        url = f"https://api.weixin.qq.com/cgi-bin/token?{q}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            app.logger.error("wechat token request failed: %s", e)
+            return None
+        if "access_token" not in payload:
+            app.logger.error("wechat token response: %s", payload)
+            return None
+        token = str(payload["access_token"])
+        expires = int(payload.get("expires_in", 7200))
+        _wechat_token_cache["token"] = token
+        _wechat_token_cache["deadline"] = now + max(120.0, float(expires) - 300.0)
+        return token
+
+
+def _sync_wechat_media_to_cos(submission_id: int, media_id: str, participant_code: str) -> None:
+    """后台：微信临时素材下载后写入 COS，并更新 video_submissions。"""
+    if not _cos_env_ok() or not _wechat_media_api_ok():
+        app.logger.warning("COS sync skipped: COS or WeChat API not configured")
+        return
+    try:
+        token = _wechat_access_token()
+        if not token:
+            return
+        qs = urllib.parse.urlencode({"access_token": token, "media_id": media_id})
+        api = f"https://api.weixin.qq.com/cgi-bin/media/get?{qs}"
+        req = urllib.request.Request(api)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = resp.read()
+            ctype_hdr = resp.headers.get("Content-Type", "") or ""
+            ctype = ctype_hdr.split(";")[0].strip().lower()
+        if body.startswith(b"{") or "application/json" in ctype:
+            app.logger.error(
+                "wechat media/get not binary, submission_id=%s body=%s",
+                submission_id,
+                body[:500],
+            )
+            return
+        ext = ".mp4"
+        if ctype in ("video/quicktime",):
+            ext = ".mov"
+        cos_key = f"uploads/{participant_code}/chat/{submission_id}{ext}"
+        mime = ctype if ctype else "video/mp4"
+        cli = _get_cos_client()
+        cli.put_object(Bucket=COS_BUCKET, Body=body, Key=cos_key, ContentType=mime)
+        supabase.table("video_submissions").update(
+            {"object_key": cos_key, "size_bytes": len(body), "mime": mime}
+        ).eq("id", submission_id).execute()
+        app.logger.info(
+            "COS sync ok submission_id=%s bytes=%s key=%s",
+            submission_id,
+            len(body),
+            cos_key,
+        )
+    except urllib.error.HTTPError as e:
+        err_b = e.read() if e.fp else b""
+        app.logger.error(
+            "wechat media/get HTTPError submission_id=%s %s %s",
+            submission_id,
+            e.code,
+            err_b[:400],
+        )
+    except Exception:
+        app.logger.exception("COS sync failed submission_id=%s", submission_id)
+
+
+def _dt_to_iso_z(dt: datetime) -> str:
+    u = dt.astimezone(timezone.utc)
+    return u.isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
-# 鉴权（API_SECRET 非空时启用）
+# 鉴权
 # ---------------------------------------------------------------------------
 
 
 def _extract_bearer_or_api_key() -> Optional[str]:
-    """从 Authorization: Bearer 或 X-API-Key 取出令牌原文。"""
     auth = request.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
         t = auth[7:].strip()
@@ -59,7 +196,6 @@ def _extract_bearer_or_api_key() -> Optional[str]:
 
 
 def _token_matches_secret(token: str) -> bool:
-    """与 API_SECRET 做恒定时间比较，降低时序旁路风险。"""
     try:
         a = token.encode("utf-8")
         b = API_SECRET.encode("utf-8")
@@ -70,10 +206,11 @@ def _token_matches_secret(token: str) -> bool:
 
 @app.before_request
 def enforce_api_auth():
-    """全局前置：未配置 API_SECRET 时不拦截；OPTIONS 留给 CORS；/health 给探活。"""
     if request.method == "OPTIONS":
         return None
     if request.path == "/health":
+        return None
+    if request.path == "/wechat/callback":
         return None
     if not API_SECRET:
         return None
@@ -92,289 +229,17 @@ def enforce_api_auth():
 
 
 # ---------------------------------------------------------------------------
-# 传感器与分页常量
-# ---------------------------------------------------------------------------
-
-REQUIRED_SENSOR_FIELDS = ("session_id", "sensor_type", "x", "y", "z", "timestamp")
-MAX_BATCH_SIZE = 500
-DEFAULT_SAMPLE_LIMIT = 500
-MAX_SAMPLE_LIMIT = 5000
-
-# 数值时间 >= 该阈值视为「Unix 纪元秒」（>1e12 会先按毫秒折算）；小于阈值在绝对时间模式下报错，
-# 在 timestamp_is_elapsed=true 时表示「相对 sessions.start_time 的秒数」。
-_UNIX_SEC_THRESHOLD = 1_000_000_000.0
-
-
-# ---------------------------------------------------------------------------
-# 时间解析与归一化（写入 TIMESTAMPTZ 前统一成 ISO 字符串供 PostgREST）
+# 元数据
 # ---------------------------------------------------------------------------
 
 
-def _parse_iso_to_utc_aware(s: str) -> datetime:
-    """将 API/数据库返回的 ISO 字符串解析为带时区的 UTC datetime。"""
-    t = s.strip().replace("Z", "+00:00")
-    dt = datetime.fromisoformat(t)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _dt_to_iso_z(dt: datetime) -> str:
-    """UTC 时间转 ISO 字符串，末尾用 Z 便于与前端约定一致。"""
-    u = dt.astimezone(timezone.utc)
-    return u.isoformat().replace("+00:00", "Z")
-
-
-def normalize_absolute_timestamptz(value: Any, field: str) -> str:
-    """ISO8601 字符串原样（trim）；数值视为 Unix 秒，>1e12 视为毫秒。用于 start_time / end_time 等绝对时间。"""
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            raise ValueError(f"{field} must be non-empty")
-        return s
-    if isinstance(value, bool):
-        raise ValueError(f"{field}: unexpected boolean")
-    if isinstance(value, (int, float)):
-        x = float(value)
-        if x > 10_000_000_000:
-            x /= 1000.0
-        if x >= _UNIX_SEC_THRESHOLD:
-            return _dt_to_iso_z(datetime.fromtimestamp(x, tz=timezone.utc))
-        raise ValueError(
-            f"{field}: numeric value too small for Unix epoch; use seconds since 1970 (e.g. Date.timeIntervalSince1970) "
-            f"or ISO8601 string. CACurrentMediaTime alone is not wall time."
-        )
-    raise ValueError(f"{field}: expected string or number")
-
-
-def normalize_optional_absolute_timestamptz(value: Any, field: str) -> Optional[str]:
-    """可选绝对时间；None 保持 None（如 end_time 未传）。"""
-    if value is None:
-        return None
-    return normalize_absolute_timestamptz(value, field)
-
-
-def normalize_since_query_param(raw: str) -> str:
-    """GET .../samples?since= 支持 ISO 或 Unix 秒/毫秒数字字符串。"""
-    s = raw.strip()
-    if not s:
-        return s
-    try:
-        n = float(s)
-        if n > 10_000_000_000:
-            n /= 1000.0
-        if n >= _UNIX_SEC_THRESHOLD:
-            return _dt_to_iso_z(datetime.fromtimestamp(n, tz=timezone.utc))
-    except ValueError:
-        pass
-    return s
-
-
-def _fetch_session_start_time_iso(session_id: str) -> Optional[str]:
-    """读取已注册会话的 start_time（Supabase 返回的字符串），供 elapsed 模式叠加相对秒数。"""
-    r = supabase.table("sessions").select("start_time").eq("session_id", session_id).limit(1).execute()
-    if not r.data:
-        return None
-    st = r.data[0].get("start_time")
-    return str(st) if st is not None else None
-
-
-def normalize_sensor_timestamp(
-    raw: Any,
-    *,
-    session_id: str,
-    timestamp_is_elapsed: bool,
-    session_start_iso: Optional[str],
-) -> tuple[Optional[str], Optional[tuple]]:
-    """成功 (iso, None)；失败 (None, (jsonify(...), status))。"""
-    if timestamp_is_elapsed:
-        if not isinstance(raw, (int, float)):
-            return None, (
-                jsonify(
-                    {
-                        "error": "timestamp must be a number when timestamp_is_elapsed is true",
-                        "detail": "Use seconds since session wall start (e.g. CACurrentMediaTime - t0Media).",
-                    }
-                ),
-                400,
-            )
-        if session_start_iso is None:
-            return None, (
-                jsonify({"error": "session start_time missing", "hint": session_id}),
-                500,
-            )
-        try:
-            base = _parse_iso_to_utc_aware(session_start_iso)
-        except (ValueError, TypeError):
-            return None, (
-                jsonify(
-                    {
-                        "error": "Cannot parse session start_time for elapsed mode",
-                        "detail": str(session_start_iso),
-                    }
-                ),
-                500,
-            )
-        dt = base + timedelta(seconds=float(raw))
-        return _dt_to_iso_z(dt), None
-
-    try:
-        return normalize_absolute_timestamptz(raw, "timestamp"), None
-    except ValueError as e:
-        return None, (jsonify({"error": str(e)}), 400)
-
-
-def _truthy_flag(v: Any) -> bool:
-    """兼容 JSON 里 true / "true" / 1 等形式的布尔开关。"""
-    if v is True:
-        return True
-    if isinstance(v, str) and v.lower() in ("1", "true", "yes"):
-        return True
-    if v == 1:
-        return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# sessions 表：创建时可写字段 / PATCH 允许字段（与数据库列名一致）
-# ---------------------------------------------------------------------------
-
-SESSION_REQUIRED_CREATE = (
-    "session_id",
-    "user_selected_mode",
-    "capture_mode",
-    "start_time",
-)
-SESSION_OPTIONAL_CREATE = (
-    "device_model",
-    "ios_version",
-    "app_version",
-    "end_time",
-    "duration_ms",
-    "total_rgb_frames",
-    "total_pose_samples",
-    "total_imu_samples",
-    "total_depth_frames",
-    "upload_status",
-)
-SESSION_PATCHABLE = (
-    "end_time",
-    "duration_ms",
-    "total_rgb_frames",
-    "total_pose_samples",
-    "total_imu_samples",
-    "total_depth_frames",
-    "upload_status",
-    "user_selected_mode",
-    "capture_mode",
-    "device_model",
-    "ios_version",
-    "app_version",
-    "start_time",
-)
-
-
-# ---------------------------------------------------------------------------
-# 会话存在性校验与 sensor_data 行构造
-# ---------------------------------------------------------------------------
-
-
-def _session_not_found_response(session_id: str):
-    """统一 404 结构，提示先 POST /sessions。"""
-    return (
-        jsonify(
-            {
-                "error": "Session not found",
-                "detail": "请先用 POST /sessions 注册该会话",
-                "hint": session_id,
-            }
-        ),
-        404,
-    )
-
-
-def _require_session_exists(session_id: str):
-    """session_id 为业务 UUID 字符串，对应 sessions.session_id 与 sensor_data.session_id。"""
-    r = supabase.table("sessions").select("id").eq("session_id", session_id).limit(1).execute()
-    if not r.data:
-        return _session_not_found_response(session_id)
-    return None
-
-
-def _sensor_row_with_ts(data: dict, timestamp_iso: str) -> dict:
-    """插入 sensor_data 的一行；timestamp 已归一化为 ISO。"""
-    return {
-        "session_id": data["session_id"],
-        "sensor_type": data["sensor_type"],
-        "x": data["x"],
-        "y": data["y"],
-        "z": data["z"],
-        "timestamp": timestamp_iso,
-    }
-
-
-def _validate_sensor_item(item, index: Optional[int] = None):
-    """校验单条上传体是否含必填键；index 非空时错误信息带上下标。"""
-    if not isinstance(item, dict):
-        msg = "Each item must be an object"
-        if index is not None:
-            msg = f"Invalid item at index {index}"
-        return msg
-    missing = [f for f in REQUIRED_SENSOR_FIELDS if f not in item]
-    if missing:
-        prefix = f"Item at index {index}: " if index is not None else ""
-        return f"{prefix}Missing fields: {', '.join(missing)}"
-    return None
-
-
-def _build_session_insert_row(data: dict) -> tuple[Optional[dict], Optional[tuple]]:
-    """
-    组装 POST /sessions 的 insert 字典。
-    成功返回 (row, None)；失败返回 (None, (jsonify(...), status))。
-    """
-    missing = [k for k in SESSION_REQUIRED_CREATE if k not in data or data[k] is None]
-    if missing:
-        return None, (jsonify({"error": "Missing fields", "detail": ", ".join(missing)}), 400)
-    row: dict = {}
-    try:
-        sid = str(data["session_id"]).strip()
-        row["session_id"] = sid
-        um = data["user_selected_mode"]
-        row["user_selected_mode"] = um.strip() if isinstance(um, str) else um
-        cm = data["capture_mode"]
-        row["capture_mode"] = cm.strip() if isinstance(cm, str) else cm
-        row["start_time"] = normalize_absolute_timestamptz(data["start_time"], "start_time")
-    except ValueError as e:
-        return None, (jsonify({"error": str(e)}), 400)
-    if not row["session_id"]:
-        return None, (jsonify({"error": "session_id must be non-empty"}), 400)
-    for k in SESSION_OPTIONAL_CREATE:
-        if k not in data or data[k] is None:
-            continue
-        if k in ("end_time",):
-            try:
-                row[k] = normalize_optional_absolute_timestamptz(data[k], k)
-            except ValueError as e:
-                return None, (jsonify({"error": str(e)}), 400)
-        else:
-            row[k] = data[k]
-    return row, None
-
-
-# ---------------------------------------------------------------------------
-# 路由：元数据与健康
-# ---------------------------------------------------------------------------
-
-
-@app.route('/health', methods=['GET'])
+@app.route("/health", methods=["GET"])
 def health():
-    """负载均衡/探活；不查库。"""
     return jsonify({"status": "ok"})
 
 
 @app.route("/openapi.json", methods=["GET"])
 def openapi_spec():
-    """返回仓库内 openapi.json，供 Swagger / 代码生成使用。"""
     if not OPENAPI_JSON.is_file():
         return jsonify({"error": "OpenAPI file missing"}), 404
     with OPENAPI_JSON.open(encoding="utf-8") as f:
@@ -383,278 +248,440 @@ def openapi_spec():
 
 
 # ---------------------------------------------------------------------------
-# 路由：传感器写入（须先注册 sessions）
+# 视频收集
 # ---------------------------------------------------------------------------
 
 
-@app.route('/upload_sensor', methods=['POST'])
-def upload_sensor():
-    """单条写入 sensor_data；可选 JSON 字段 timestamp_is_elapsed。"""
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid JSON body"}), 400
-    err = _validate_sensor_item(data)
-    if err:
-        return jsonify({"error": err}), 400
-    missing = _require_session_exists(data["session_id"])
-    if missing:
-        return missing
-
-    # 相对时间模式：timestamp 为秒数，叠加到该会话的 sessions.start_time 墙钟时刻
-    ts_flag = _truthy_flag(data.get("timestamp_is_elapsed"))
-    start_iso = _fetch_session_start_time_iso(data["session_id"]) if ts_flag else None
-    ts_iso, terr = normalize_sensor_timestamp(
-        data["timestamp"],
-        session_id=data["session_id"],
-        timestamp_is_elapsed=ts_flag,
-        session_start_iso=start_iso,
-    )
-    if terr:
-        return terr
-
-    result = supabase.table("sensor_data").insert(_sensor_row_with_ts(data, ts_iso)).execute()
-    return jsonify({"message": "ok", "id": result.data[0]["id"]}), 201
+def _xml_text(el: Optional[Element]) -> Optional[str]:
+    if el is None or el.text is None:
+        return None
+    s = el.text.strip()
+    return s if s else None
 
 
-@app.route('/upload_sensor_batch', methods=['POST'])
-def upload_sensor_batch():
-    """批量写入；全表 session_id 须一致。顶层 timestamp_is_elapsed 可被单条同名字段覆盖。"""
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid JSON body"}), 400
-    if "items" not in data:
-        return jsonify({"error": "Missing items"}), 400
-    items = data["items"]
-    if not isinstance(items, list):
-        return jsonify({"error": "items must be a list"}), 400
-    if len(items) == 0:
-        return jsonify({"error": "items is empty"}), 400
-    if len(items) > MAX_BATCH_SIZE:
-        return jsonify({"error": f"Maximum {MAX_BATCH_SIZE} items per request"}), 400
-
-    first_sid = items[0].get("session_id")
-    if not isinstance(first_sid, str) or not first_sid.strip():
-        return jsonify({"error": "Invalid session_id in first item"}), 400
-    first_sid = first_sid.strip()
-    for i, item in enumerate(items):
-        err = _validate_sensor_item(item, i)
-        if err:
-            return jsonify({"error": err}), 400
-        sid = item.get("session_id")
-        if sid != first_sid:
-            return (
-                jsonify(
-                    {"error": "All items must use the same session_id", "detail": f"mismatch at index {i}"}
-                ),
-                400,
-            )
-    missing = _require_session_exists(first_sid)
-    if missing:
-        return missing
-
-    batch_ts_flag = _truthy_flag(data.get("timestamp_is_elapsed"))
-    # 任一条要用 elapsed，就拉一次 session.start_time，避免循环里重复查库
-    need_start = batch_ts_flag or any(
-        _truthy_flag(it.get("timestamp_is_elapsed")) if isinstance(it, dict) and "timestamp_is_elapsed" in it else False
-        for it in items
-    )
-    start_iso = _fetch_session_start_time_iso(first_sid) if need_start else None
-
-    rows = []
-    for item in items:
-        item_flag = (
-            _truthy_flag(item["timestamp_is_elapsed"])
-            if isinstance(item, dict) and "timestamp_is_elapsed" in item
-            else batch_ts_flag
-        )
-        ts_iso, terr = normalize_sensor_timestamp(
-            item["timestamp"],
-            session_id=first_sid,
-            timestamp_is_elapsed=item_flag,
-            session_start_iso=start_iso if item_flag else None,
-        )
-        if terr:
-            return terr
-        rows.append(_sensor_row_with_ts(item, ts_iso))
-
-    result = supabase.table("sensor_data").insert(rows).execute()
-    inserted = result.data or []
-    ids = [r["id"] for r in inserted if isinstance(r, dict) and "id" in r]
-    return jsonify({"message": "ok", "count": len(rows), "ids": ids}), 201
-
-
-# ---------------------------------------------------------------------------
-# 路由：会话列表、创建、采样分页、更新与删除
-# ---------------------------------------------------------------------------
-
-
-@app.route('/sessions', methods=['GET'])
-def list_sessions():
-    """读视图 session_stats（须已在 Supabase 执行 schema_extras.sql）。"""
+def _insert_video_submission_row(
+    row: dict[str, Any],
+) -> tuple[str, Optional[dict]]:
+    """
+    写入 video_submissions。
+    返回 ("inserted", 行字典) | ("duplicate", None) | ("error", None)。
+    """
     try:
-        result = (
-            supabase.table("session_stats")
-            .select("*")
-            .order("start_time", desc=True)
-            .execute()
+        result = supabase.table("video_submissions").insert(row).execute()
+        ins = result.data or []
+        if not ins:
+            return "error", None
+        app.logger.info(
+            "video_submission inserted id=%s source=%s",
+            ins[0].get("id"),
+            row.get("source"),
         )
-        return jsonify({"sessions": result.data or []})
-    except APIError as e:
-        return jsonify(
-            {
-                "error": "Failed to load sessions",
-                "detail": str(e),
-                "hint": "在 Supabase 执行 schema_extras.sql（sessions 与 sensor_data 关联的 session_stats 视图）",
-            }
-        ), 503
-
-
-@app.route("/sessions", methods=["POST"])
-def create_session():
-    """插入 sessions 一行；session_id 重复时尝试映射 409。"""
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid JSON body"}), 400
-    row, bad = _build_session_insert_row(data)
-    if bad:
-        return bad
-    assert row is not None
-    try:
-        result = supabase.table("sessions").insert(row).execute()
-        inserted = result.data or []
-        if not inserted:
-            return jsonify({"error": "Insert returned no row"}), 500
-        return jsonify({"message": "ok", "session": inserted[0]}), 201
+        return "inserted", ins[0]
     except APIError as e:
         err_s = str(e).lower()
         if "duplicate" in err_s or "unique" in err_s or "23505" in err_s:
-            return jsonify({"error": "Session already exists", "detail": str(e)}), 409
-        return jsonify({"error": "Failed to create session", "detail": str(e)}), 500
+            app.logger.info(
+                "video_submission dedupe wechat_media_id=%s", row.get("wechat_media_id")
+            )
+            return "duplicate", None
+        app.logger.error("video_submission insert: %s", e)
+        return "error", None
 
 
-@app.route('/sessions/<path:session_id>/samples', methods=['GET'])
-def list_session_samples(session_id: str):
-    """
-    分页拉取 sensor_data。
-    路由须注册在 DELETE /sessions/<id> 之前，避免 path 把「xxx/samples」吞成 session_id。
-    游标：下一页传上一页返回的 next_cursor 作为查询参数 after_id。
-    """
-    sid = (session_id or "").strip()
-    if not sid:
-        return jsonify({"error": "Invalid session_id"}), 400
-
-    raw_limit = request.args.get("limit", str(DEFAULT_SAMPLE_LIMIT))
-    try:
-        limit = int(raw_limit)
-    except ValueError:
-        return jsonify({"error": "limit must be an integer"}), 400
-    limit = max(1, min(limit, MAX_SAMPLE_LIMIT))
-
-    since = request.args.get("since")
-    if since is not None:
-        since = since.strip()
-        if since == "":
-            since = None
-        else:
-            since = normalize_since_query_param(since)
-
-    after_id_raw = request.args.get("after_id")
-    after_id: Optional[int] = None
-    if after_id_raw is not None and after_id_raw != "":
-        try:
-            after_id = int(after_id_raw)
-        except ValueError:
-            return jsonify({"error": "after_id must be an integer"}), 400
-
-    missing = _require_session_exists(sid)
-    if missing:
-        return missing
-
-    try:
-        q = supabase.table("sensor_data").select("*").eq("session_id", sid)
-        if since is not None:
-            q = q.gte("timestamp", since)
-        if after_id is not None:
-            q = q.gt("id", after_id)
-        result = q.order("id", desc=False).limit(limit).execute()
-        items = result.data or []
-        next_cursor = None
-        has_more = False
-        if items and len(items) == limit:
-            last = items[-1]
-            if isinstance(last, dict) and "id" in last:
-                next_cursor = last["id"]
-                has_more = True
-        return jsonify(
-            {
-                "session_id": sid,
-                "items": items,
-                "count": len(items),
-                "next_cursor": next_cursor,
-                "has_more": has_more,
-            }
+def _ingest_chat_video_wechat(
+    openid: str,
+    media_id: str,
+    *,
+    user_comment: Optional[str] = None,
+) -> None:
+    """服务号会话内用户发送 video / shortvideo 时入库；若已配置 COS 与微信 AppSecret，后台线程转存 COS。"""
+    pr = (
+        supabase.table("participants")
+        .select("id, participant_code")
+        .eq("wechat_openid", openid)
+        .limit(1)
+        .execute()
+    )
+    if not pr.data:
+        app.logger.info(
+            "chat video skipped: no participant for openid prefix=%s",
+            (openid[:6] + "…") if len(openid) > 6 else openid,
         )
+        return
+    pid = pr.data[0]["id"]
+    code = str(pr.data[0]["participant_code"])
+    row: dict[str, Any] = {
+        "participant_id": pid,
+        "participant_code": code,
+        "source": "chat",
+        "object_key": f"wechat/pending/{media_id}",
+        "wechat_media_id": media_id,
+        "user_comment": user_comment,
+        "review_status": "pending",
+    }
+    status, ins_row = _insert_video_submission_row(row)
+    if status == "error":
+        app.logger.error("chat video insert failed (see log for APIError)")
+        return
+    if (
+        status == "inserted"
+        and ins_row is not None
+        and _cos_env_ok()
+        and _wechat_media_api_ok()
+    ):
+        sid = int(ins_row["id"])
+        threading.Thread(
+            target=_sync_wechat_media_to_cos,
+            args=(sid, media_id, code),
+            daemon=True,
+        ).start()
+
+
+def _process_wechat_inbound_xml(root: Element) -> None:
+    msg_type_el = root.find("MsgType")
+    msg_type = (_xml_text(msg_type_el) or "").lower()
+    if msg_type in ("video", "shortvideo"):
+        openid = _xml_text(root.find("FromUserName"))
+        media_id = _xml_text(root.find("MediaId"))
+        if not openid or not media_id:
+            app.logger.warning("wechat %s missing FromUserName or MediaId", msg_type)
+            return
+        user_comment = _xml_text(root.find("Description"))
+        _ingest_chat_video_wechat(openid, media_id, user_comment=user_comment)
+        return
+    app.logger.info("wechat MsgType=%s (no ingest)", msg_type or "?")
+
+
+def _next_participant_code() -> str:
+    r = (
+        supabase.table("participants")
+        .select("participant_code")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    n = 1
+    if r.data:
+        try:
+            n = int(str(r.data[0].get("participant_code", "0"))) + 1
+        except (TypeError, ValueError):
+            n = 1
+    if n > 999_999:
+        n = 1
+    return f"{n:06d}"
+
+
+@app.route("/wechat/callback", methods=["GET", "POST"])
+def wechat_callback():
+    if request.method == "GET":
+        if not WECHAT_TOKEN:
+            return jsonify({"error": "WECHAT_TOKEN not configured"}), 503
+        signature = request.args.get("signature", "")
+        timestamp = request.args.get("timestamp", "")
+        nonce = request.args.get("nonce", "")
+        echostr = request.args.get("echostr", "")
+        tmp = "".join(sorted([WECHAT_TOKEN, timestamp, nonce]))
+        if hashlib.sha1(tmp.encode("utf-8")).hexdigest() != signature:
+            return "Forbidden", 403
+        return echostr, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    raw = request.data or b""
+    if not raw:
+        return "success", 200, {"Content-Type": "text/plain; charset=utf-8"}
+    try:
+        root = ET.fromstring(raw)
+        _process_wechat_inbound_xml(root)
+    except ET.ParseError:
+        app.logger.warning("wechat XML parse error")
+    return "success", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.route("/participants", methods=["POST"])
+def create_participant():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    openid = str(data.get("wechat_openid") or "").strip()
+    real_name = str(data.get("real_name") or "").strip()
+    phone = str(data.get("phone") or "").strip()
+    if not openid or not real_name or not phone:
+        return (
+            jsonify(
+                {
+                    "error": "Missing fields",
+                    "detail": "wechat_openid, real_name, phone required",
+                }
+            ),
+            400,
+        )
+    exist = (
+        supabase.table("participants")
+        .select("*")
+        .eq("wechat_openid", openid)
+        .limit(1)
+        .execute()
+    )
+    if exist.data:
+        return (
+            jsonify(
+                {
+                    "error": "Participant already exists",
+                    "participant": exist.data[0],
+                }
+            ),
+            409,
+        )
+    extra = data.get("extra")
+    if extra is not None and not isinstance(extra, dict):
+        return jsonify({"error": "extra must be an object"}), 400
+    status = str(data.get("status") or "active").strip()
+    if status not in ("active", "paused", "withdrawn"):
+        return jsonify({"error": "invalid status"}), 400
+
+    for _ in range(32):
+        code = _next_participant_code()
+        row = {
+            "wechat_openid": openid,
+            "real_name": real_name,
+            "phone": phone,
+            "participant_code": code,
+            "status": status,
+            "extra": extra if isinstance(extra, dict) else {},
+        }
+        try:
+            result = supabase.table("participants").insert(row).execute()
+            ins = result.data or []
+            if not ins:
+                return jsonify({"error": "Insert returned no row"}), 500
+            return jsonify({"message": "ok", "participant": ins[0]}), 201
+        except APIError as e:
+            err_s = str(e).lower()
+            if "duplicate" in err_s or "unique" in err_s or "23505" in err_s:
+                continue
+            return jsonify({"error": "Failed to create participant", "detail": str(e)}), 500
+    return jsonify({"error": "Could not allocate participant_code"}), 500
+
+
+@app.route("/participants/by_openid", methods=["GET"])
+def participant_by_openid():
+    oid = (request.args.get("wechat_openid") or "").strip()
+    if not oid:
+        return jsonify({"error": "wechat_openid query param required"}), 400
+    r = supabase.table("participants").select("*").eq("wechat_openid", oid).limit(1).execute()
+    if not r.data:
+        return jsonify({"error": "not found", "hint": oid}), 404
+    return jsonify({"participant": r.data[0]})
+
+
+@app.route("/participants/code/<participant_code>", methods=["GET"])
+def participant_by_code(participant_code: str):
+    code = (participant_code or "").strip()
+    if not code:
+        return jsonify({"error": "invalid code"}), 400
+    r = supabase.table("participants").select("*").eq("participant_code", code).limit(1).execute()
+    if not r.data:
+        return jsonify({"error": "not found", "hint": code}), 404
+    return jsonify({"participant": r.data[0]})
+
+
+@app.route("/upload/presign", methods=["POST"])
+def upload_presign():
+    """签发腾讯云 COS PUT 预签名 URL（H5 大视频直传）。"""
+    if not _cos_env_ok():
+        return (
+            jsonify(
+                {
+                    "error": "COS not configured",
+                    "detail": "需要 COS_SECRET_ID、COS_SECRET_KEY、COS_REGION、COS_BUCKET，见 .env.example",
+                }
+            ),
+            503,
+        )
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    code = str(data.get("participant_code") or "").strip()
+    oid = str(data.get("wechat_openid") or "").strip()
+    if not code or not oid:
+        return (
+            jsonify(
+                {"error": "Missing fields", "detail": "participant_code, wechat_openid required"}
+            ),
+            400,
+        )
+    pr = (
+        supabase.table("participants")
+        .select("id")
+        .eq("participant_code", code)
+        .eq("wechat_openid", oid)
+        .limit(1)
+        .execute()
+    )
+    if not pr.data:
+        return jsonify({"error": "Participant mismatch"}), 404
+    content_type = str(data.get("content_type") or "video/mp4").strip() or "video/mp4"
+    key = f"uploads/{code}/h5/{uuid.uuid4().hex}.mp4"
+    expires = 600
+    try:
+        cli = _get_cos_client()
+        signed_url = cli.get_presigned_url(
+            Bucket=COS_BUCKET,
+            Key=key,
+            Method="PUT",
+            Expired=expires,
+            Headers={"Content-Type": content_type},
+        )
+    except Exception as e:
+        app.logger.exception("COS presign failed")
+        return jsonify({"error": "presign failed", "detail": str(e)}), 500
+    return (
+        jsonify(
+            {
+                "method": "PUT",
+                "url": signed_url,
+                "headers": {"Content-Type": content_type},
+                "object_key": key,
+                "expires_in": expires,
+                "storage": "tencent_cos",
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/upload/complete", methods=["POST"])
+def upload_complete():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    req = ("participant_code", "wechat_openid", "source", "object_key")
+    missing = [k for k in req if not str(data.get(k) or "").strip()]
+    if missing:
+        return jsonify({"error": "Missing fields", "detail": ", ".join(missing)}), 400
+    code = str(data["participant_code"]).strip()
+    oid = str(data["wechat_openid"]).strip()
+    source = str(data["source"]).strip().lower()
+    object_key = str(data["object_key"]).strip()
+    if source not in ("chat", "h5"):
+        return jsonify({"error": "source must be chat or h5"}), 400
+    pr = (
+        supabase.table("participants")
+        .select("id")
+        .eq("participant_code", code)
+        .eq("wechat_openid", oid)
+        .limit(1)
+        .execute()
+    )
+    if not pr.data:
+        return (
+            jsonify(
+                {
+                    "error": "Participant mismatch",
+                    "detail": "No row for this participant_code and wechat_openid",
+                }
+            ),
+            404,
+        )
+    participant_id = pr.data[0]["id"]
+    row: dict = {
+        "participant_id": participant_id,
+        "participant_code": code,
+        "source": source,
+        "object_key": object_key,
+        "wechat_media_id": (str(data["wechat_media_id"]).strip() if data.get("wechat_media_id") else None),
+        "file_name": (str(data["file_name"]).strip() if data.get("file_name") else None),
+        "size_bytes": data.get("size_bytes"),
+        "mime": (str(data["mime"]).strip() if data.get("mime") else None),
+        "duration_sec": data.get("duration_sec"),
+        "user_comment": (str(data["user_comment"]).strip() if data.get("user_comment") else None),
+        "review_status": "pending",
+    }
+    if row["size_bytes"] is not None:
+        try:
+            row["size_bytes"] = int(row["size_bytes"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "size_bytes must be integer"}), 400
+    status, submission = _insert_video_submission_row(row)
+    if status == "error":
+        return jsonify({"error": "Failed to insert submission"}), 500
+    if status == "inserted" and submission is not None:
+        return jsonify({"message": "ok", "submission": submission}), 201
+    if status == "duplicate":
+        if row.get("wechat_media_id"):
+            r = (
+                supabase.table("video_submissions")
+                .select("*")
+                .eq("wechat_media_id", row["wechat_media_id"])
+                .limit(1)
+                .execute()
+            )
+        else:
+            r = (
+                supabase.table("video_submissions")
+                .select("*")
+                .eq("participant_id", participant_id)
+                .eq("object_key", object_key)
+                .limit(1)
+                .execute()
+            )
+        if r.data:
+            return jsonify(
+                {"message": "ok", "submission": r.data[0], "deduplicated": True}
+            ), 200
+        return jsonify({"message": "ok", "deduplicated": True}), 200
+    return jsonify({"error": "Unexpected insert state"}), 500
+
+
+@app.route("/admin/submissions", methods=["GET"])
+def admin_list_submissions():
+    status_filter = (request.args.get("review_status") or "").strip()
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except ValueError:
+        return jsonify({"error": "limit must be integer"}), 400
+    limit = max(1, min(limit, 200))
+    q = supabase.table("video_submissions").select("*")
+    if status_filter:
+        if status_filter not in ("pending", "approved", "rejected"):
+            return jsonify({"error": "invalid review_status"}), 400
+        q = q.eq("review_status", status_filter)
+    try:
+        result = q.order("id", desc=True).limit(limit).execute()
+        return jsonify({"submissions": result.data or []})
     except APIError as e:
         return jsonify({"error": "Query failed", "detail": str(e)}), 500
 
 
-@app.route("/sessions/<path:session_id>", methods=["PATCH", "DELETE"])
-def session_by_text_id(session_id: str):
-    """按业务 session_id（TEXT）更新或删除 sessions 行；path 支持含斜杠的编码路径。"""
-    sid = (session_id or "").strip()
-    if not sid:
-        return jsonify({"error": "Invalid session_id"}), 400
-    if request.method == "DELETE":
-        return _delete_session_by_text_id(sid)
-    return _patch_session_by_text_id(sid)
-
-
-def _delete_session_by_text_id(sid: str):
-    """删除 sessions；若 DB 有 ON DELETE CASCADE 则一并删 sensor_data。"""
-    try:
-        result = (
-            supabase.table("sessions")
-            .delete(count="exact", returning="minimal")
-            .eq("session_id", sid)
-            .execute()
-        )
-        n = result.count if result.count is not None else 0
-        if n == 0:
-            return jsonify({"error": "Session not found", "hint": sid}), 404
-        return jsonify({"message": "ok", "session_id": sid})
-    except APIError as e:
-        return jsonify({"error": "Delete failed", "detail": str(e)}), 500
-
-
-def _patch_session_by_text_id(sid: str):
-    """部分更新；start_time/end_time 走与创建相同的时间归一化。注意：postgrest 的 update 链上不能接 .select()。"""
+@app.route("/admin/submissions/<int:submission_id>", methods=["PATCH"])
+def admin_patch_submission(submission_id: int):
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "Invalid or empty JSON body"}), 400
-    patch = {k: data[k] for k in SESSION_PATCHABLE if k in data}
+    patch: dict = {}
+    if "review_status" in data:
+        rs = str(data["review_status"] or "").strip()
+        if rs not in ("pending", "approved", "rejected"):
+            return jsonify({"error": "invalid review_status"}), 400
+        patch["review_status"] = rs
+    if "reject_reason" in data:
+        patch["reject_reason"] = data["reject_reason"]
     if not patch:
-        return jsonify({"error": "No patchable fields", "detail": ", ".join(SESSION_PATCHABLE)}), 400
-    for tk in ("start_time", "end_time"):
-        if tk not in patch:
-            continue
-        try:
-            if tk == "end_time":
-                patch[tk] = normalize_optional_absolute_timestamptz(patch[tk], tk)
-            else:
-                patch[tk] = normalize_absolute_timestamptz(patch[tk], tk)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "No patchable fields", "detail": "review_status, reject_reason"}), 400
+    if patch.get("review_status") in ("approved", "rejected"):
+        patch["reviewed_at"] = _dt_to_iso_z(datetime.now(tz=timezone.utc))
     try:
-        # postgrest：update().eq() 返回的 builder 无 .select()；默认 Prefer: return=representation 已带回更新行
-        result = supabase.table("sessions").update(patch).eq("session_id", sid).execute()
+        result = (
+            supabase.table("video_submissions")
+            .update(patch)
+            .eq("id", submission_id)
+            .execute()
+        )
         rows = result.data or []
         if not rows:
-            return jsonify({"error": "Session not found", "hint": sid}), 404
-        return jsonify({"message": "ok", "session": rows[0]})
+            return jsonify({"error": "submission not found", "hint": submission_id}), 404
+        return jsonify({"message": "ok", "submission": rows[0]})
     except APIError as e:
         return jsonify({"error": "Update failed", "detail": str(e)}), 500
 
 
-if __name__ == '__main__':
-    # 0.0.0.0：局域网内手机可通过 Mac IP + 端口访问；生产请换 gunicorn 等并关闭 debug
-    app.run(host='0.0.0.0', port=5000, debug=True)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)

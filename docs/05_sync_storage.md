@@ -1,71 +1,32 @@
-# 时间同步、本地存储与上传
+# 媒体流转、存储与一致性（方案 B · 腾讯云 COS）
 
-## 时间同步与对齐
+## 1. 原则
 
-### 同步原则
-- 所有数据流使用统一高精度时间基准
-- RGB 是主 anchor 流
-- Pose 绑定 RGB frame
-- Depth 通过 mapping 或 timestamp 映射到 RGB
-- IMU 独立高频流，通过统一时间戳关联
+- **微信侧**：消息 XML 中的 `MediaId` 须在临时素材有效期内，用 **`access_token`（`client_credential`，`WECHAT_APP_ID` + `WECHAT_APP_SECRET`）** 调用 **`cgi-bin/media/get`** 拉取二进制。
+- **自有侧**：**腾讯云 COS** 为权威副本；数据库仅存 `object_key`、大小、MIME 等元数据。
+- **H5 大文件**：浏览器对 COS 发起 **PUT**（`POST /upload/presign` 返回预签名 URL），成功后 **`POST /upload/complete`** 落库。
 
-### 对齐要求
-| 数据组合 | 对齐要求 |
-|----------|----------|
-| RGB + Pose | 必须帧级关联 |
-| RGB + Depth | 必须可通过映射重建 |
-| RGB + IMU | 必须可按时间戳对齐 |
-| Full / Lite | 必须共享统一时间规范 |
+## 2. 对话框小视频路径
 
-### 工程要求
-- 不允许各模态使用不同时间源
-- 不允许录制结束后再靠猜测补齐关联关系
-- metadata 中必须保留对齐与缺失信息
+1. `POST /wechat/callback` 解析 `video` / `shortvideo`，写入 `video_submissions`（先占位 `object_key=wechat/pending/{MediaId}`）。
+2. 若已配置 **COS + `WECHAT_APP_ID`/`WECHAT_APP_SECRET`**：在**后台线程**中用 `CosS3Client.put_object` 写入 COS，路径建议 `uploads/{participant_code}/chat/{submission_id}.mp4`（或按 Content-Type 使用 `.mov`），再 **UPDATE** 表字段 `object_key`、`size_bytes`、`mime`。
+3. 未配置云/微信凭证时：保留占位 `object_key`，由运维补拉或仅依赖人工流程。
 
-## 本地存储结构（建议）
-/session_{session_id}/
-manifest.json
-camera.json
-pose.csv
-imu.csv
-index/
-rgb_frames.csv
-depth_frames.csv
-video/
-chunk_0001.mp4
-chunk_0002.mp4
-depth/
-chunk_0001.bin
-chunk_0002.bin
-logs/
-session.log
-preview.mp4
+未登记 openid：不建单，仅日志。
 
-### manifest 最低字段
-- session_id, schema_version, user_selected_mode, available_modes, full_mode_disable_reason
-- capture_mode, has_lidar, has_depth, device_model, ios_version, app_version
-- start_time / end_time, duration_ms
-- total_rgb_frames, total_depth_frames, total_imu_samples, total_pose_samples
-- known_issues, upload_status
+## 3. 大视频路径（菜单 → H5 → COS）
 
-## 上传与后台要求
+1. H5 携带鉴权后调用 **`POST /upload/presign`**（`participant_code`、`wechat_openid`、可选 `content_type`）。
+2. 服务端校验参与者后生成 COS **PUT 预签名 URL** 与 `object_key`（如 `uploads/{code}/h5/{uuid}.mp4`）。
+3. 前端 **PUT** 文件至该 URL（**Content-Type 须与签名一致**）。
+4. **`POST /upload/complete`** 写入 `video_submissions`（`source=h5`，`object_key` 与预签名一致）。
 
-### 上传原则
-- 原生模块执行
-- 支持 session / chunk 级上传
-- 支持断点续传和失败重试
-- 上传前必须做完整性校验
+## 4. 审核与发布
 
-### 上传要求
-| 项目 | 要求 |
-|------|------|
-| 上传方式 | chunk / session 级 |
-| 上传前检查 | manifest、chunk、index 一致性 |
-| 失败恢复 | 支持 |
-| 上传状态 | not_uploaded / queued / uploading / uploaded / failed / partial_failed |
+- 审核可使用 COS **临时访问链接**、CDN、或带鉴权的下载代理；不在微信侧审片。
+- 业务通知仍走模板消息等，与存储 key 解耦。
 
-### 后台兼容
-- Full：解析 RGB、Depth、IMU、Pose
-- Lite：解析 RGB、IMU、Pose
-- Partial：可入库，打质量标签
-- Invalid：拒绝进入主训练流程
+## 5. 备份与留存
+
+- COS **多 AZ / 版本管理 / 生命周期** 按合规与成本配置。
+- 用户删除诉求需同步 **COS 对象删除 + 库表脱敏** 策略。
