@@ -1,13 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Readable as NodeReadable } from "node:stream";
 
-import {
-  CompleteMultipartUploadCommand,
-  CreateMultipartUploadCommand,
-  PutObjectCommand,
-  S3Client,
-  UploadPartCommand,
-} from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import {
@@ -164,71 +158,6 @@ export async function putObjectReadableStream(params: {
       Key: params.objectKey,
       Body: params.body,
       ContentType: params.contentType,
-    }),
-  );
-}
-
-export async function s3CreateMultipartUpload(params: { objectKey: string; contentType: string }): Promise<string> {
-  const provider = getObjectStorageProvider();
-  if (!provider) {
-    throw new Error("Object storage is not configured");
-  }
-  const out = await getStorageClient().send(
-    new CreateMultipartUploadCommand({
-      Bucket: getStorageBucket(provider),
-      Key: params.objectKey,
-      ContentType: params.contentType,
-    }),
-  );
-  if (!out.UploadId) {
-    throw new Error("CreateMultipartUpload returned no UploadId");
-  }
-  return out.UploadId;
-}
-
-export async function s3UploadPart(params: {
-  objectKey: string;
-  uploadId: string;
-  partNumber: number;
-  body: Buffer;
-}): Promise<string> {
-  const provider = getObjectStorageProvider();
-  if (!provider) {
-    throw new Error("Object storage is not configured");
-  }
-  const out = await getStorageClient().send(
-    new UploadPartCommand({
-      Bucket: getStorageBucket(provider),
-      Key: params.objectKey,
-      UploadId: params.uploadId,
-      PartNumber: params.partNumber,
-      Body: params.body,
-    }),
-  );
-  if (!out.ETag) {
-    throw new Error("UploadPart returned no ETag");
-  }
-  return out.ETag;
-}
-
-export async function s3CompleteMultipartUpload(params: {
-  objectKey: string;
-  uploadId: string;
-  parts: { PartNumber: number; ETag: string }[];
-}): Promise<void> {
-  const provider = getObjectStorageProvider();
-  if (!provider) {
-    throw new Error("Object storage is not configured");
-  }
-  const sorted = [...params.parts].sort((a, b) => a.PartNumber - b.PartNumber);
-  await getStorageClient().send(
-    new CompleteMultipartUploadCommand({
-      Bucket: getStorageBucket(provider),
-      Key: params.objectKey,
-      UploadId: params.uploadId,
-      MultipartUpload: {
-        Parts: sorted.map((p) => ({ PartNumber: p.PartNumber, ETag: p.ETag })),
-      },
     }),
   );
 }

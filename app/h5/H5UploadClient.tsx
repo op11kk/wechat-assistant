@@ -110,91 +110,6 @@ function uploadViaServerProxy(
   });
 }
 
-/** 与服务端 `SINGLE_PROXY_MAX_BYTES` / `MULTIPART_PART_SIZE_BYTES` 一致（3MiB） */
-const SERVER_SINGLE_BODY_MAX_BYTES = 3 * 1024 * 1024;
-
-type MultipartInitResponse = {
-  upload_id: string;
-  object_key: string;
-  session_token: string;
-  part_size_bytes: number;
-  total_parts: number;
-};
-
-/** 大于 3MB 的文件分片 POST，避免 Vercel FUNCTION_PAYLOAD_TOO_LARGE */
-async function uploadViaServerProxyMultipart(
-  file: File,
-  params: { participantCode: string; wechatOpenid: string; apiSecret: string; comment: string },
-  onProgress: (value: number) => void,
-): Promise<unknown> {
-  const contentType = file.type || "video/mp4";
-  const authHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (params.apiSecret.trim()) {
-    authHeaders.Authorization = `Bearer ${params.apiSecret.trim()}`;
-  }
-
-  const initRes = await fetch("/upload/multipart/init", {
-    method: "POST",
-    headers: authHeaders,
-    body: JSON.stringify({
-      participant_code: params.participantCode.trim(),
-      wechat_openid: params.wechatOpenid.trim(),
-      file_name: file.name,
-      content_type: contentType,
-      total_size: file.size,
-    }),
-  });
-  if (!initRes.ok) {
-    throw new Error(`分片初始化失败: HTTP ${initRes.status} ${JSON.stringify(await readJsonOrText(initRes))}`);
-  }
-  const init = (await initRes.json()) as MultipartInitResponse;
-  const partSize = init.part_size_bytes;
-  const parts: { PartNumber: number; ETag: string }[] = [];
-
-  let partNum = 1;
-  for (let offset = 0; offset < file.size; offset += partSize, partNum += 1) {
-    const chunk = file.slice(offset, Math.min(offset + partSize, file.size));
-    const buf = await chunk.arrayBuffer();
-    const partHeaders: Record<string, string> = {
-      "Content-Type": "application/octet-stream",
-      "X-Part-Number": String(partNum),
-      "X-Multipart-Session": init.session_token,
-      "X-Participant-Code": params.participantCode.trim(),
-      "X-Wechat-Openid": params.wechatOpenid.trim(),
-    };
-    if (params.apiSecret.trim()) {
-      partHeaders.Authorization = `Bearer ${params.apiSecret.trim()}`;
-    }
-    const pr = await fetch("/upload/multipart/part", {
-      method: "POST",
-      headers: partHeaders,
-      body: buf,
-    });
-    if (!pr.ok) {
-      throw new Error(`分片 ${partNum}/${init.total_parts} 失败: HTTP ${pr.status} ${JSON.stringify(await readJsonOrText(pr))}`);
-    }
-    const row = (await pr.json()) as { etag: string };
-    parts.push({ PartNumber: partNum, ETag: row.etag });
-    onProgress(Math.round((partNum / init.total_parts) * 100));
-  }
-
-  const completeRes = await fetch("/upload/multipart/complete", {
-    method: "POST",
-    headers: authHeaders,
-    body: JSON.stringify({
-      session_token: init.session_token,
-      parts,
-      user_comment: params.comment.trim() || undefined,
-    }),
-  });
-  if (!completeRes.ok) {
-    throw new Error(`合并分片失败: HTTP ${completeRes.status} ${JSON.stringify(await readJsonOrText(completeRes))}`);
-  }
-  return await readJsonOrText(completeRes);
-}
-
 export default function H5UploadClient() {
   const [participantCode, setParticipantCode] = useState("");
   const [wechatOpenid, setWechatOpenid] = useState("");
@@ -238,28 +153,22 @@ export default function H5UploadClient() {
       const contentType = file.type || "video/mp4";
 
       if (useServerProxy) {
-        const p = {
-          participantCode: participantCode.trim(),
-          wechatOpenid: wechatOpenid.trim(),
-          apiSecret: apiSecret.trim(),
-          comment: comment.trim(),
-        };
+        appendLog(
+          "info",
+          "经服务器同源中转（POST /upload/proxy → 对象存储 + 回写库，无需 COS CORS）。单请求体积受 Vercel 约 4.5MB 限制，更大请取消勾选改用预签名直传。",
+        );
         try {
-          if (file.size <= SERVER_SINGLE_BODY_MAX_BYTES) {
-            appendLog(
-              "info",
-              `经服务器单次中转（≤${(SERVER_SINGLE_BODY_MAX_BYTES / 1024 / 1024).toFixed(0)}MB，同源免 COS CORS）。`,
-            );
-            const result = await uploadViaServerProxy(file, p, setProgress);
-            appendLog("success", result);
-          } else {
-            appendLog(
-              "info",
-              `文件约 ${(file.size / 1024 / 1024).toFixed(2)}MB，使用分片中转（每片 ${(SERVER_SINGLE_BODY_MAX_BYTES / 1024 / 1024).toFixed(0)}MB，需配置 API_SECRET 或 WECHAT_TOKEN 做会话签名校验）。`,
-            );
-            const result = await uploadViaServerProxyMultipart(file, p, setProgress);
-            appendLog("success", result);
-          }
+          const result = await uploadViaServerProxy(
+            file,
+            {
+              participantCode: participantCode.trim(),
+              wechatOpenid: wechatOpenid.trim(),
+              apiSecret: apiSecret.trim(),
+              comment: comment.trim(),
+            },
+            setProgress,
+          );
+          appendLog("success", result);
         } catch (error) {
           appendLog("error", String(error));
         }
@@ -342,9 +251,8 @@ export default function H5UploadClient() {
           <p className="eyebrow">H5 直传</p>
           <h1>大视频上传页</h1>
           <p>
-            默认<strong>经本站中转</strong>：≤3MB 单次请求；更大文件自动<strong>分片</strong>上传（需已配置{" "}
-            <code>API_SECRET</code> 或 <code>WECHAT_TOKEN</code> 做分片会话签名）。取消勾选可改为<strong>预签名直传</strong>
-            （需在 COS 配 CORS）。参与者须为 <code>active</code>。
+            默认<strong>经本站同源中转</strong>（<code>POST /upload/proxy</code>），无需 COS CORS；单文件大小受 Vercel 请求体上限（约 4.5MB）约束。
+            取消勾选可改为<strong>预签名直传</strong>（适合大视频，需在 COS 配置 CORS）。参与者须为 <code>active</code>。
           </p>
         </header>
 
@@ -376,7 +284,7 @@ export default function H5UploadClient() {
                 onChange={(event) => setUseServerProxy(event.target.checked)}
                 type="checkbox"
               />{" "}
-              经服务器中转上传（免 COS 跨域；大文件请配好 CORS 后取消勾选用直传）
+              经服务器同源中转（免 COS 跨域；大于约 4.5MB 请取消勾选改用直传）
             </label>
           </div>
 
