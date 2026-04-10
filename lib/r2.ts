@@ -13,7 +13,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   buildPublicObjectUrl,
   env,
-  getCosS3PathStyleEndpoint,
+  getCosEndpoint,
   getObjectStorageProvider,
   getR2Endpoint,
   ObjectStorageProvider,
@@ -53,14 +53,14 @@ function getStorageClient(): S3Client {
       requestChecksumCalculation: "WHEN_REQUIRED",
     });
   } else {
+    // 腾讯云 COS 要求虚拟主机域名，path-style 会报 PathStyleDomainForbidden
     client = new S3Client({
       region: env.COS_REGION,
-      endpoint: getCosS3PathStyleEndpoint(),
+      endpoint: getCosEndpoint(),
       credentials: {
         accessKeyId: env.COS_SECRET_ID,
         secretAccessKey: env.COS_SECRET_KEY,
       },
-      forcePathStyle: true,
       requestChecksumCalculation: "WHEN_REQUIRED",
     });
   }

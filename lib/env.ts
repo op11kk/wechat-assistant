@@ -68,20 +68,15 @@ export function getR2Endpoint(): string {
   return `https://${env.CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
 }
 
-/** 虚拟主机样式（bucket 在子域）。若桶名含「.」或格式异常，浏览器会报 ERR_CERT_COMMON_NAME_INVALID。 */
+/**
+ * 腾讯云 COS S3 兼容接口必须使用虚拟主机样式，否则报错 PathStyleDomainForbidden。
+ * COS_BUCKET 须与控制台「存储桶名称」完全一致，一般为「自定义前缀-APPID」单段，勿重复拼接两段。
+ */
 export function getCosEndpoint(): string {
   if (!env.COS_REGION || !env.COS_BUCKET) {
     throw new Error("Missing COS_REGION or COS_BUCKET");
   }
   return `https://${env.COS_BUCKET}.cos.${env.COS_REGION}.myqcloud.com`;
-}
-
-/** COS S3 兼容 API 的 path-style 端点，证书 CN 匹配 cos.<region>.myqcloud.com，供预签名与 SDK 使用。 */
-export function getCosS3PathStyleEndpoint(): string {
-  if (!env.COS_REGION) {
-    throw new Error("Missing COS_REGION");
-  }
-  return `https://cos.${env.COS_REGION}.myqcloud.com`;
 }
 
 export function getSupabaseProjectRef(): string | null {
