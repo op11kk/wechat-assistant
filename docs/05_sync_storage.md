@@ -8,7 +8,7 @@
 
 ## 2. 对话框小视频路径
 
-1. `POST /wechat/callback` 解析 `video` / `shortvideo`，写入 `video_submissions`（先占位 `object_key=wechat/pending/{MediaId}`）。
+1. `POST /api/wechat` 解析 `video` / `shortvideo`，写入 `video_submissions`（先占位 `object_key=wechat/pending/{MediaId}`）。
 2. 若已配置 **Cloudflare R2 + `WECHAT_APP_ID`/`WECHAT_APP_SECRET`**：服务端会异步拉取微信临时素材并写入 R2，路径建议 `uploads/{participant_code}/chat/{submission_id}.mp4`（或按 Content-Type 使用 `.mov`），再 **UPDATE** 表字段 `object_key`、`size_bytes`、`mime`。
 3. 未配置云/微信凭证时：保留占位 `object_key`，由运维补拉或仅依赖人工流程。
 

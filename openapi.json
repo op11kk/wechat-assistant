@@ -3,7 +3,7 @@
   "info": {
     "title": "iosbehind API",
     "version": "2.2.0",
-    "description": "微信服务号视频数据收集 + Cloudflare R2。环境变量见 .env.example。若设置 API_SECRET，除 GET /health、GET|POST /wechat/callback、GET /h5 外须携带 Bearer 或 X-API-Key。\n\n建表：schema_video_collector.sql"
+    "description": "微信服务号视频数据收集 + Cloudflare R2。环境变量见 .env.example。若设置 API_SECRET，除 GET /health、GET|POST /api/wechat、GET /h5 外须携带 Bearer 或 X-API-Key。\n\n建表：schema_video_collector.sql"
   },
   "servers": [{ "url": "http://localhost:3000", "description": "本地开发" }],
   "tags": [
@@ -213,7 +213,7 @@
         }
       }
     },
-    "/wechat/callback": {
+    "/api/wechat": {
       "get": {
         "tags": ["wechat"],
         "summary": "微信服务器验证",

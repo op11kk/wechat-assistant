@@ -8,7 +8,7 @@ const endpointCards = [
   },
   {
     title: "微信回调",
-    path: "GET|POST /wechat/callback",
+    path: "GET|POST /api/wechat",
     detail: "验证服务号 URL，接收 video/shortvideo 并落库。",
   },
   {

@@ -24,8 +24,8 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/wechat/callback` | 公众平台 URL 校验，查询参数 `signature/timestamp/nonce/echostr`，需环境变量 **`WECHAT_TOKEN`** |
-| POST | `/wechat/callback` | 接收明文 XML，返回 `success`。**MsgType 为 `video` / `shortvideo`** 且用户已登记时写入 `video_submissions`（先 `wechat/pending/{MediaId}`；若配置 **Cloudflare R2 + `WECHAT_APP_ID`/`WECHAT_APP_SECRET`**，服务端异步拉临时素材并写入 R2，再更新 `object_key` / `size_bytes` / `mime`） |
+| GET | `/api/wechat` | 公众平台 URL 校验，查询参数 `signature/timestamp/nonce/echostr`，需环境变量 **`WECHAT_TOKEN`** |
+| POST | `/api/wechat` | 接收明文 XML，返回 `success`。**MsgType 为 `video` / `shortvideo`** 且用户已登记时写入 `video_submissions`（先 `wechat/pending/{MediaId}`；若配置 **Cloudflare R2 + `WECHAT_APP_ID`/`WECHAT_APP_SECRET`**，服务端异步拉临时素材并写入 R2，再更新 `object_key` / `size_bytes` / `mime`） |
 | POST | `/participants` |  body：`wechat_openid`, `real_name`, `phone`（可选 `status`, `extra`）→ 分配 **`participant_code`** |
 | GET | `/participants/by_openid?wechat_openid=` | 按 openid 查询 |
 | GET | `/participants/code/{participant_code}` | 按编号查询 |
