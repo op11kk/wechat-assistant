@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Readable as NodeReadable } from "node:stream";
 
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -126,6 +127,25 @@ export async function createPresignedUploadUrl(params: {
 export async function putObjectBuffer(params: {
   objectKey: string;
   body: Buffer;
+  contentType: string;
+}): Promise<void> {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  await getStorageClient().send(
+    new PutObjectCommand({
+      Bucket: getStorageBucket(provider),
+      Key: params.objectKey,
+      Body: params.body,
+      ContentType: params.contentType,
+    }),
+  );
+}
+
+export async function putObjectReadableStream(params: {
+  objectKey: string;
+  body: NodeReadable;
   contentType: string;
 }): Promise<void> {
   const provider = getObjectStorageProvider();

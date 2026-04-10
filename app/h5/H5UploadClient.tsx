@@ -64,6 +64,52 @@ function uploadWithProgress(
   });
 }
 
+/** 同源 POST 到 /upload/proxy，由服务端写入 COS + Supabase，绕过浏览器对 COS 的 CORS。 */
+function uploadViaServerProxy(
+  file: File,
+  params: { participantCode: string; wechatOpenid: string; apiSecret: string; comment: string },
+  onProgress: (value: number) => void,
+): Promise<unknown> {
+  const contentType = file.type || "video/mp4";
+  const headers: Record<string, string> = {
+    "Content-Type": contentType,
+    "X-Participant-Code": params.participantCode.trim(),
+    "X-Wechat-Openid": params.wechatOpenid.trim(),
+    "X-File-Name": encodeURIComponent(file.name),
+  };
+  if (params.apiSecret.trim()) {
+    headers.Authorization = `Bearer ${params.apiSecret.trim()}`;
+  }
+  if (params.comment.trim()) {
+    headers["X-User-Comment"] = encodeURIComponent(params.comment.trim());
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/upload/proxy", true);
+    Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+      onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        try {
+          resolve(JSON.parse(xhr.responseText) as unknown);
+        } catch {
+          resolve(xhr.responseText);
+        }
+        return;
+      }
+      reject(new Error(`中转上传失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 500)}`));
+    };
+    xhr.onerror = () => reject(new Error("中转上传网络错误（请检查网络或 Vercel 限制）"));
+    xhr.send(file);
+  });
+}
+
 export default function H5UploadClient() {
   const [participantCode, setParticipantCode] = useState("");
   const [wechatOpenid, setWechatOpenid] = useState("");
@@ -73,6 +119,8 @@ export default function H5UploadClient() {
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [isPending, startTransition] = useTransition();
+  /** 不经浏览器直传 COS，避免 COS CORS；大文件受 Vercel 请求体限制。 */
+  const [useServerProxy, setUseServerProxy] = useState(true);
 
   const appendLog = (type: LogLine["type"], value: unknown) => {
     setLogs((current) => [...current, { type, text: formatLogValue(value) }]);
@@ -103,6 +151,29 @@ export default function H5UploadClient() {
       }
 
       const contentType = file.type || "video/mp4";
+
+      if (useServerProxy) {
+        appendLog(
+          "info",
+          "经服务器中转上传（与站点同源，无需配置 COS CORS；体积受 Vercel 套餐限制，大文件请改直传）。",
+        );
+        try {
+          const result = await uploadViaServerProxy(
+            file,
+            {
+              participantCode: participantCode.trim(),
+              wechatOpenid: wechatOpenid.trim(),
+              apiSecret: apiSecret.trim(),
+              comment: comment.trim(),
+            },
+            setProgress,
+          );
+          appendLog("success", result);
+        } catch (error) {
+          appendLog("error", String(error));
+        }
+        return;
+      }
 
       appendLog("info", "1/3 请求对象存储预签名。");
       const presignResponse = await fetch("/upload/presign", {
@@ -180,8 +251,8 @@ export default function H5UploadClient() {
           <p className="eyebrow">H5 直传</p>
           <h1>大视频上传页</h1>
           <p>
-            Next.js 路由签发对象存储（Cloudflare R2 或腾讯云 COS）的 PUT 预签名，浏览器直传文件，成功后再写入 Supabase 的{" "}
-            <code>video_submissions</code>。参与者须为 <code>active</code>。
+            默认<strong>经本站中转</strong>上传到对象存储并写入 <code>video_submissions</code>（无需 COS CORS，适合腾讯云控制台难配跨域时）。
+            取消勾选可改为<strong>预签名直传</strong>（大文件更稳，但需在 COS 配置 CORS）。参与者须为 <code>active</code>。
           </p>
         </header>
 
@@ -204,6 +275,17 @@ export default function H5UploadClient() {
               onChange={(event) => setWechatOpenid(event.target.value)}
               placeholder="微信 openid"
             />
+          </div>
+
+          <div className="field field-full">
+            <label className="field-checkbox">
+              <input
+                checked={useServerProxy}
+                onChange={(event) => setUseServerProxy(event.target.checked)}
+                type="checkbox"
+              />{" "}
+              经服务器中转上传（免 COS 跨域；大文件请配好 CORS 后取消勾选用直传）
+            </label>
           </div>
 
           <div className="field field-full">

@@ -217,6 +217,20 @@ a {
   font-weight: 700;
 }
 
+.field-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.field-checkbox input {
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
 .field input,
 .field textarea {
   width: 100%;
