@@ -32,15 +32,31 @@ export function verifyWechatSignature(signature: string, timestamp: string, nonc
 export function parseWechatInboundXml(xml: string): {
   msgType: string;
   openid: string | null;
+  toUserName: string | null;
   mediaId: string | null;
   description: string | null;
+  event: string | null;
+  content: string | null;
 } {
   return {
     msgType: (extractXmlTag(xml, "MsgType") ?? "").toLowerCase(),
     openid: extractXmlTag(xml, "FromUserName"),
+    toUserName: extractXmlTag(xml, "ToUserName"),
     mediaId: extractXmlTag(xml, "MediaId"),
     description: extractXmlTag(xml, "Description"),
+    event: extractXmlTag(xml, "Event"),
+    content: extractXmlTag(xml, "Content"),
   };
+}
+
+/** 被动回复文本（明文模式），ToUserName/FromUserName 与微信入站报文相反。 */
+export function buildWechatPassiveTextReply(params: {
+  toUserOpenid: string;
+  fromOfficialUserName: string;
+  content: string;
+}): string {
+  const createTime = Math.floor(Date.now() / 1000);
+  return `<xml><ToUserName><![CDATA[${params.toUserOpenid}]]></ToUserName><FromUserName><![CDATA[${params.fromOfficialUserName}]]></FromUserName><CreateTime>${createTime}</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${params.content}]]></Content></xml>`;
 }
 
 export async function getWechatAccessToken(): Promise<string | null> {

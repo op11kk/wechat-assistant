@@ -13,6 +13,15 @@ export function textResponse(text: string, status = 200): NextResponse {
   });
 }
 
+export function xmlResponse(xml: string, status = 200): NextResponse {
+  return new NextResponse(xml, {
+    status,
+    headers: {
+      "Content-Type": "application/xml; charset=utf-8",
+    },
+  });
+}
+
 export function isDuplicateError(error: { code?: string; message?: string } | null): boolean {
   if (!error) {
     return false;

@@ -64,6 +64,15 @@ export async function POST(request: NextRequest) {
         404,
       );
     }
+    if (participant.status !== "active") {
+      return jsonResponse(
+        {
+          error: "Participant not active",
+          detail: "登记状态非 active 时不能写入投稿，请联系管理员。",
+        },
+        403,
+      );
+    }
 
     const payload = {
       participant_id: participant.id,

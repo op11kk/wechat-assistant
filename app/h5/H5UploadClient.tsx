@@ -53,7 +53,7 @@ function uploadWithProgress(
         resolve();
         return;
       }
-      reject(new Error(`R2 PUT failed: HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
+        reject(new Error(`直传 PUT 失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
     };
     xhr.send(file);
   });
@@ -99,7 +99,7 @@ export default function H5UploadClient() {
 
       const contentType = file.type || "video/mp4";
 
-      appendLog("info", "1/3 请求 Cloudflare R2 预签名。");
+      appendLog("info", "1/3 请求对象存储预签名。");
       const presignResponse = await fetch("/upload/presign", {
         method: "POST",
         headers: apiHeaders(),
@@ -125,7 +125,7 @@ export default function H5UploadClient() {
         return;
       }
 
-      appendLog("info", "2/3 正在直传到 Cloudflare R2。");
+      appendLog("info", "2/3 正在直传到对象存储。");
       try {
         await uploadWithProgress(
           uploadUrl,
@@ -172,11 +172,11 @@ export default function H5UploadClient() {
     <main className="upload-shell">
       <section className="upload-panel">
         <header className="upload-header">
-          <p className="eyebrow">Cloudflare R2 Upload</p>
+          <p className="eyebrow">H5 直传</p>
           <h1>大视频上传页</h1>
           <p>
-            现在的流程是 Next.js 路由签发 R2 预签名，浏览器直接 PUT 到 Cloudflare R2，成功后再写入
-            Supabase 的 <code>video_submissions</code>。
+            Next.js 路由签发对象存储（Cloudflare R2 或腾讯云 COS）的 PUT 预签名，浏览器直传文件，成功后再写入 Supabase 的{" "}
+            <code>video_submissions</code>。参与者须为 <code>active</code>。
           </p>
         </header>
 

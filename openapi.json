@@ -2,8 +2,8 @@
   "openapi": "3.0.3",
   "info": {
     "title": "iosbehind API",
-    "version": "2.2.0",
-    "description": "微信服务号视频数据收集 + Cloudflare R2。环境变量见 .env.example。若设置 API_SECRET，除 GET /health、GET|POST /api/wechat、GET /h5 外须携带 Bearer 或 X-API-Key。\n\n建表：schema_video_collector.sql"
+    "version": "2.3.0",
+    "description": "微信服务号视频数据收集 + 对象存储（Cloudflare R2 或腾讯云 COS）。环境变量见 .env.example。若设置 API_SECRET，除 GET /health、GET|POST /api/wechat、GET /h5 外须携带 Bearer 或 X-API-Key。\n\n建表：schema_video_collector.sql"
   },
   "servers": [{ "url": "http://localhost:3000", "description": "本地开发" }],
   "tags": [
@@ -28,17 +28,43 @@
     "schemas": {
       "HealthResponse": {
         "type": "object",
-        "required": ["status", "db"],
+        "required": ["status", "db", "storage", "checks"],
         "properties": {
-          "status": { "type": "string", "example": "ok" },
+          "status": { "type": "string", "enum": ["ok", "misconfigured"] },
           "db": {
             "type": "string",
             "enum": ["supabase", "sqlite"],
             "description": "本仓库实现为 supabase；sqlite 仅预留与其它部署对齐"
           },
+          "storage": {
+            "type": "string",
+            "description": "cloudflare_r2 | tencent_cos | unconfigured"
+          },
           "supabase_ref": {
             "type": "string",
             "description": "由 SUPABASE_URL 解析出的项目 ref，用于核对是否连对库"
+          },
+          "checks": {
+            "type": "object",
+            "required": [
+              "supabase_configured",
+              "api_secret_set",
+              "wechat_token_set",
+              "wechat_app_credentials_set",
+              "public_object_base_url_set"
+            ],
+            "properties": {
+              "supabase_configured": { "type": "boolean" },
+              "api_secret_set": { "type": "boolean" },
+              "wechat_token_set": { "type": "boolean" },
+              "wechat_app_credentials_set": { "type": "boolean" },
+              "object_storage": {
+                "type": "string",
+                "nullable": true,
+                "description": "cloudflare_r2 或 tencent_cos；未配置对象存储时为 null"
+              },
+              "public_object_base_url_set": { "type": "boolean" }
+            }
           }
         }
       },
@@ -106,7 +132,8 @@
           "review_status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
           "reject_reason": { "type": "string", "nullable": true },
           "reviewed_at": { "type": "string", "nullable": true },
-          "created_at": { "type": "string" }
+          "created_at": { "type": "string" },
+          "object_url": { "type": "string", "nullable": true, "description": "配置了公开域名时由接口拼装" }
         }
       },
       "UploadCompleteBody": {
@@ -141,6 +168,13 @@
             "type": "array",
             "items": { "$ref": "#/components/schemas/VideoSubmission" }
           }
+        }
+      },
+      "SubmissionSingleResponse": {
+        "type": "object",
+        "required": ["submission"],
+        "properties": {
+          "submission": { "$ref": "#/components/schemas/VideoSubmission" }
         }
       },
       "PatchSubmissionBody": {
@@ -179,7 +213,8 @@
           },
           "object_key": { "type": "string" },
           "expires_in": { "type": "integer" },
-          "storage": { "type": "string", "example": "cloudflare_r2" }
+          "storage": { "type": "string", "example": "cloudflare_r2" },
+          "object_url": { "type": "string", "nullable": true }
         }
       }
     }
@@ -234,7 +269,18 @@
         "tags": ["wechat"],
         "summary": "微信消息回调（明文 XML）",
         "security": [],
-        "responses": { "200": { "description": "success" } }
+        "parameters": [
+          { "name": "signature", "in": "query", "schema": { "type": "string" } },
+          { "name": "timestamp", "in": "query", "schema": { "type": "string" } },
+          { "name": "nonce", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "无回复或被动回复 XML（text 消息）；成功受理时也可能返回纯文本 success"
+          },
+          "403": { "description": "签名校验失败" },
+          "503": { "description": "未配置 WECHAT_TOKEN" }
+        }
       }
     },
     "/participants": {
@@ -306,7 +352,7 @@
     "/upload/presign": {
       "post": {
         "tags": ["video_collector"],
-        "summary": "Cloudflare R2 PUT 预签名（H5 直传）",
+        "summary": "对象存储 PUT 预签名（H5 直传，R2 或 COS）",
         "requestBody": {
           "required": true,
           "content": {
@@ -328,8 +374,12 @@
             "description": "参与者不存在",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           },
+          "403": {
+            "description": "参与者非 active",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
           "503": {
-            "description": "未配置 Cloudflare R2",
+            "description": "未配置对象存储（R2 或 COS）",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           }
         }
@@ -354,6 +404,10 @@
           },
           "400": {
             "description": "Bad Request",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "参与者非 active",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           },
           "404": {
@@ -386,6 +440,34 @@
       }
     },
     "/admin/submissions/{submission_id}": {
+      "get": {
+        "tags": ["video_collector"],
+        "summary": "单条投稿详情",
+        "parameters": [
+          {
+            "name": "submission_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SubmissionSingleResponse" } }
+            }
+          },
+          "400": {
+            "description": "非法 id",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "未找到",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      },
       "patch": {
         "tags": ["video_collector"],
         "summary": "更新审核状态",

@@ -162,6 +162,24 @@ a {
   line-height: 1.6;
 }
 
+.flow-steps {
+  margin: 12px 0 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  line-height: 1.75;
+}
+
+.flow-steps li {
+  margin-bottom: 0.5rem;
+}
+
+.info-card code {
+  font-size: 0.9em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(22, 33, 31, 0.08);
+}
+
 .card-path {
   color: var(--brand-dark) !important;
   font-size: 0.83rem;

@@ -49,7 +49,7 @@ export async function findParticipantByCode(participantCode: string) {
 export async function findParticipantByCodeAndOpenId(participantCode: string, openid: string) {
   const { data, error } = await getSupabaseAdmin()
     .from("participants")
-    .select("id, participant_code")
+    .select("id, participant_code, status")
     .eq("participant_code", participantCode)
     .eq("wechat_openid", openid)
     .maybeSingle();
@@ -146,15 +146,27 @@ export async function syncWechatMediaToR2(
   }
 }
 
+export type ChatVideoIngestResult =
+  | { ok: true; submissionId: number }
+  | {
+      ok: false;
+      reason: "not_registered" | "participant_inactive" | "duplicate" | "insert_failed";
+      detail?: string;
+    };
+
 export async function ingestChatVideoWechat(params: {
   openid: string;
   mediaId: string;
   userComment?: string | null;
-}): Promise<void> {
+}): Promise<ChatVideoIngestResult> {
   const participant = await findParticipantByOpenId(params.openid);
   if (!participant) {
     console.info("wechat chat video skipped because participant does not exist");
-    return;
+    return { ok: false, reason: "not_registered" };
+  }
+  if (participant.status !== "active") {
+    console.info("wechat chat video skipped because participant is not active", participant.status);
+    return { ok: false, reason: "participant_inactive" };
   }
   const row: VideoSubmissionInsert = {
     participant_id: participant.id,
@@ -167,15 +179,23 @@ export async function ingestChatVideoWechat(params: {
   };
   const insertResult = await insertVideoSubmissionRow(row);
   if (insertResult.status !== "inserted" || !insertResult.submission) {
-    return;
+    if (insertResult.status === "duplicate") {
+      return { ok: false, reason: "duplicate" };
+    }
+    return {
+      ok: false,
+      reason: "insert_failed",
+      detail: insertResult.detail ?? "insert did not return row",
+    };
   }
   const submissionId = Number(insertResult.submission.id);
   if (!Number.isFinite(submissionId)) {
-    return;
+    return { ok: false, reason: "insert_failed", detail: "invalid submission id" };
   }
   void syncWechatMediaToR2(submissionId, params.mediaId, participant.participant_code).catch((error) => {
     console.error("wechat media sync failed", error);
   });
+  return { ok: true, submissionId };
 }
 
 export function decorateSubmissionObjectUrl<T extends { object_key?: string | null }>(row: T): T & {

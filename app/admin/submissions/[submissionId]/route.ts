@@ -7,6 +7,29 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ submissionId: string }> },
+) {
+  const unauthorized = requireApiAuth(request);
+  if (unauthorized) {
+    return unauthorized;
+  }
+  const { submissionId } = await context.params;
+  const id = Number.parseInt(submissionId, 10);
+  if (!Number.isFinite(id)) {
+    return jsonResponse({ error: "invalid submission id" }, 400);
+  }
+  const { data, error } = await getSupabaseAdmin().from("video_submissions").select("*").eq("id", id).maybeSingle();
+  if (error) {
+    return jsonResponse({ error: "Query failed", detail: error.message }, 500);
+  }
+  if (!data) {
+    return jsonResponse({ error: "submission not found", hint: id }, 404);
+  }
+  return jsonResponse({ submission: decorateSubmissionObjectUrl(data) });
+}
+
 export async function PATCH(
   request: NextRequest,
   context: { params: Promise<{ submissionId: string }> },
@@ -37,7 +60,15 @@ export async function PATCH(
     }
   }
   if ("reject_reason" in body) {
-    patch.reject_reason = body.reject_reason;
+    const rr = body.reject_reason;
+    if (rr !== null && rr !== undefined && typeof rr !== "string") {
+      return jsonResponse({ error: "reject_reason must be string or null" }, 400);
+    }
+    if (rr === null || rr === undefined || `${rr}`.trim() === "") {
+      patch.reject_reason = null;
+    } else {
+      patch.reject_reason = String(rr).trim();
+    }
   }
   if (Object.keys(patch).length === 0) {
     return jsonResponse({ error: "No patchable fields", detail: "review_status, reject_reason" }, 400);

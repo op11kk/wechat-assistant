@@ -53,6 +53,15 @@ export async function POST(request: NextRequest) {
         404,
       );
     }
+    if (participant.status !== "active") {
+      return jsonResponse(
+        {
+          error: "Participant not active",
+          detail: "登记状态非 active 时不能使用 H5 上传，请联系管理员。",
+        },
+        403,
+      );
+    }
 
     const objectKey = buildH5ObjectKey(participantCode, fileName, contentType);
     const presign = await createPresignedUploadUrl({
