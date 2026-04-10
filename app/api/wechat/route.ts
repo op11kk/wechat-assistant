@@ -3,9 +3,43 @@ import { NextRequest } from "next/server";
 import { env } from "@/lib/env";
 import { jsonResponse, textResponse, xmlResponse } from "@/lib/http";
 import { ingestChatVideoWechat } from "@/lib/video-submissions";
-import { buildWechatPassiveTextReply, parseWechatInboundXml, verifyWechatSignature } from "@/lib/wechat";
+import {
+  buildWechatPassiveTextReply,
+  parseWechatInboundXml,
+  verifyWechatSignature,
+  wechatSignatureDebug,
+} from "@/lib/wechat";
 
 export const runtime = "nodejs";
+
+function getWechatSignatureParams(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  return {
+    signature: searchParams.get("signature")?.trim() ?? "",
+    timestamp: searchParams.get("timestamp")?.trim() ?? "",
+    nonce: searchParams.get("nonce")?.trim() ?? "",
+    echostr: searchParams.get("echostr"),
+  };
+}
+
+function logWechatRequest(
+  phase: string,
+  request: NextRequest,
+  params: ReturnType<typeof getWechatSignatureParams>,
+  extra?: Record<string, unknown>,
+) {
+  const url = new URL(request.url);
+  console.info("[wechat]", {
+    phase,
+    method: request.method,
+    pathname: url.pathname,
+    hasSignature: Boolean(params.signature),
+    hasTimestamp: Boolean(params.timestamp),
+    hasNonce: Boolean(params.nonce),
+    hasEchostr: params.echostr !== null,
+    ...extra,
+  });
+}
 
 function isHelpTextKeyword(raw: string | null | undefined): boolean {
   const s = raw?.trim().toLowerCase() ?? "";
@@ -18,43 +52,78 @@ function openIdRegistrationTip(userOpenid: string): string {
 
 export async function GET(request: NextRequest) {
   if (!env.WECHAT_TOKEN) {
+    console.error("[wechat] GET missing WECHAT_TOKEN");
     return jsonResponse({ error: "WECHAT_TOKEN not configured" }, 503);
   }
-  const { searchParams } = new URL(request.url);
-  const signature = searchParams.get("signature") ?? "";
-  const timestamp = searchParams.get("timestamp") ?? "";
-  const nonce = searchParams.get("nonce") ?? "";
-  const echostr = searchParams.get("echostr") ?? "";
-  if (!verifyWechatSignature(signature, timestamp, nonce)) {
+  const { signature, timestamp, nonce, echostr } = getWechatSignatureParams(request);
+  logWechatRequest("get_received", request, { signature, timestamp, nonce, echostr });
+  if (!signature || !timestamp || !nonce || echostr === null) {
+    console.warn("[wechat] GET missing required query params");
+    return jsonResponse(
+      {
+        error: "Missing query params",
+        detail: "signature, timestamp, nonce, echostr are required for WeChat URL verification.",
+      },
+      400,
+    );
+  }
+  const signatureOk = verifyWechatSignature(signature, timestamp, nonce);
+  if (!signatureOk) {
+    console.warn("[wechat] GET signature mismatch", wechatSignatureDebug(signature, timestamp, nonce));
     return textResponse("Forbidden", 403);
   }
+  console.info("[wechat] GET signature verified");
   return textResponse(echostr);
 }
 
 export async function POST(request: NextRequest) {
   if (!env.WECHAT_TOKEN) {
+    console.error("[wechat] POST missing WECHAT_TOKEN");
     return jsonResponse({ error: "WECHAT_TOKEN not configured" }, 503);
   }
-  const { searchParams } = new URL(request.url);
-  const signature = searchParams.get("signature") ?? "";
-  const timestamp = searchParams.get("timestamp") ?? "";
-  const nonce = searchParams.get("nonce") ?? "";
-  if (!verifyWechatSignature(signature, timestamp, nonce)) {
+  const { signature, timestamp, nonce } = getWechatSignatureParams(request);
+  logWechatRequest("post_received", request, { signature, timestamp, nonce, echostr: null }, {
+    contentType: request.headers.get("content-type"),
+    contentLength: request.headers.get("content-length"),
+  });
+  if (!signature || !timestamp || !nonce) {
+    console.warn("[wechat] POST missing required query params");
+    return jsonResponse(
+      {
+        error: "Missing query params",
+        detail: "signature, timestamp, nonce are required for WeChat callbacks.",
+      },
+      400,
+    );
+  }
+  const signatureOk = verifyWechatSignature(signature, timestamp, nonce);
+  if (!signatureOk) {
+    console.warn("[wechat] POST signature mismatch", wechatSignatureDebug(signature, timestamp, nonce));
     return textResponse("Forbidden", 403);
   }
   const xml = await request.text();
+  console.info("[wechat] POST body received", { bodyLength: xml.length });
   if (!xml.trim()) {
+    console.warn("[wechat] POST empty body");
     return textResponse("success");
   }
   const inbound = parseWechatInboundXml(xml);
   const userOpenid = inbound.openid;
   const officialId = inbound.toUserName;
+  console.info("[wechat] POST parsed inbound", {
+    msgType: inbound.msgType,
+    event: inbound.event,
+    hasOpenid: Boolean(userOpenid),
+    hasOfficialId: Boolean(officialId),
+    hasMediaId: Boolean(inbound.mediaId),
+  });
   const wantsOpenidHint =
     userOpenid &&
     officialId &&
     ((inbound.msgType === "event" && inbound.event?.toLowerCase() === "subscribe") ||
       (inbound.msgType === "text" && isHelpTextKeyword(inbound.content)));
   if (wantsOpenidHint && userOpenid && officialId) {
+    console.info("[wechat] POST replying with openid hint");
     return xmlResponse(
       buildWechatPassiveTextReply({
         toUserOpenid: userOpenid,
@@ -71,6 +140,7 @@ export async function POST(request: NextRequest) {
         mediaId: inbound.mediaId,
         userComment: inbound.description,
       });
+      console.info("[wechat] POST ingest result", result);
       if (result.ok && officialId) {
         return xmlResponse(
           buildWechatPassiveTextReply({
@@ -100,7 +170,7 @@ export async function POST(request: NextRequest) {
         );
       }
     } catch (error) {
-      console.error("wechat video ingest error", error);
+      console.error("[wechat] video ingest error", error);
       if (officialId) {
         return xmlResponse(
           buildWechatPassiveTextReply({
@@ -113,5 +183,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  console.info("[wechat] POST default success response");
   return textResponse("success");
 }

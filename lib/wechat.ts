@@ -29,6 +29,22 @@ export function verifyWechatSignature(signature: string, timestamp: string, nonc
   return digest === signature;
 }
 
+export function wechatSignatureDebug(signature: string, timestamp: string, nonce: string) {
+  const sorted = [env.WECHAT_TOKEN, timestamp, nonce].sort();
+  const payload = sorted.join("");
+  const digest = createHash("sha1").update(payload, "utf8").digest("hex");
+  return {
+    providedSignaturePrefix: signature.slice(0, 8),
+    computedSignaturePrefix: digest.slice(0, 8),
+    timestamp,
+    nonce,
+    tokenLength: env.WECHAT_TOKEN.length,
+    sortedPartsPreview: sorted.map((part, index) =>
+      index === 0 ? `token(len=${part.length})` : `${part.slice(0, 8)}${part.length > 8 ? "..." : ""}`,
+    ),
+  };
+}
+
 export function parseWechatInboundXml(xml: string): {
   msgType: string;
   openid: string | null;
