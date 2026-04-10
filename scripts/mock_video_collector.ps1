@@ -1,13 +1,13 @@
 # Video collector API smoke test. Run from repo root: .\scripts\mock_video_collector.ps1
-# Requires: schema_video_collector.sql, python app.py
+# Requires: schema_video_collector.sql, npm run dev
 # If API_SECRET set in .env, run: $env:API_SECRET='<same as .env>'
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$DefaultPort = "5000"
+$DefaultPort = "3000"
 if (Test-Path (Join-Path $PSScriptRoot "..\.env")) {
-    $lp = Select-String -Path (Join-Path $PSScriptRoot "..\.env") -Pattern '^FLASK_PORT=' | Select-Object -First 1
-    if ($lp) { $DefaultPort = ($lp.Line -replace '^FLASK_PORT=', '').Trim() }
+    $lp = Select-String -Path (Join-Path $PSScriptRoot "..\.env") -Pattern '^PORT=' | Select-Object -First 1
+    if ($lp) { $DefaultPort = ($lp.Line -replace '^PORT=', '').Trim() }
 }
 $Base = if ($env:BASE) { $env:BASE } else { "http://127.0.0.1:$DefaultPort" }
 $OpenId = if ($env:MOCK_OPENID) { $env:MOCK_OPENID } else { "oMock-{0}-{1}" -f (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss"), (Get-Random) }
@@ -161,6 +161,6 @@ Write-Host "==> GET /admin/submissions"
 & curl.exe -sS @(Get-CurlAuthArgs) "$Base/admin/submissions?limit=10"
 Write-Host "`n"
 
-Write-Host "Done. 401: set `$env:API_SECRET to match .env. 503 presign: fill COS_* in .env and restart app."
+Write-Host "Done. 401: set `$env:API_SECRET to match .env. 503 presign: fill CLOUDFLARE_R2_* in .env and restart app."
 Write-Host "500 /upload/complete: read response JSON `"detail`" (often RLS: use service_role key in SUPABASE_KEY or relax policies)."
-Write-Host "BASE: 默认读 .env 的 FLASK_PORT；可覆盖：`$env:BASE='http://127.0.0.1:5001'"
+Write-Host "BASE: 默认读 .env 的 PORT；可覆盖：`$env:BASE='http://127.0.0.1:3000'"

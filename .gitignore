@@ -1,6 +1,13 @@
 .env
+.idea/
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.log
+*.tsbuildinfo
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.idea/
