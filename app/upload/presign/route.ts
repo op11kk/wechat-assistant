@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { requireApiAuth } from "@/lib/auth";
-import { hasR2Config } from "@/lib/env";
+import { hasObjectStorageConfig } from "@/lib/env";
 import { jsonResponse } from "@/lib/http";
 import { buildH5ObjectKey, createPresignedUploadUrl } from "@/lib/r2";
 import { findParticipantByCodeAndOpenId } from "@/lib/video-submissions";
@@ -13,12 +13,12 @@ export async function POST(request: NextRequest) {
   if (unauthorized) {
     return unauthorized;
   }
-  if (!hasR2Config()) {
+  if (!hasObjectStorageConfig()) {
     return jsonResponse(
       {
-        error: "Cloudflare R2 not configured",
+        error: "Object storage not configured",
         detail:
-          "CLOUDFLARE_R2_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, CLOUDFLARE_R2_SECRET_ACCESS_KEY and CLOUDFLARE_R2_BUCKET are required.",
+          "Configure either Cloudflare R2 or Tencent COS credentials before requesting presigned uploads.",
       },
       503,
     );

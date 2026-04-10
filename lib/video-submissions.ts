@@ -1,4 +1,4 @@
-import { buildPublicObjectUrl, hasR2Config, hasWechatMediaConfig } from "@/lib/env";
+import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -119,7 +119,7 @@ export async function syncWechatMediaToR2(
   mediaId: string,
   participantCode: string,
 ): Promise<void> {
-  if (!hasR2Config() || !hasWechatMediaConfig()) {
+  if (!hasObjectStorageConfig() || !hasWechatMediaConfig()) {
     return;
   }
   const download = await downloadWechatMedia(mediaId);

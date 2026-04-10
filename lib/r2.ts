@@ -3,7 +3,14 @@ import { randomUUID } from "node:crypto";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-import { buildPublicObjectUrl, env, getR2Endpoint, hasR2Config } from "@/lib/env";
+import {
+  buildPublicObjectUrl,
+  env,
+  getCosEndpoint,
+  getObjectStorageProvider,
+  getR2Endpoint,
+  ObjectStorageProvider,
+} from "@/lib/env";
 
 const EXT_BY_CONTENT_TYPE: Record<string, string> = {
   "video/mp4": ".mp4",
@@ -13,22 +20,40 @@ const EXT_BY_CONTENT_TYPE: Record<string, string> = {
 };
 
 let client: S3Client | null = null;
+let clientProvider: ObjectStorageProvider | null = null;
 
-function getR2Client(): S3Client {
-  if (client) {
+function getStorageBucket(provider: ObjectStorageProvider): string {
+  return provider === "cloudflare_r2" ? env.CLOUDFLARE_R2_BUCKET : env.COS_BUCKET;
+}
+
+function getStorageClient(): S3Client {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  if (client && clientProvider === provider) {
     return client;
   }
-  if (!hasR2Config()) {
-    throw new Error("Cloudflare R2 is not configured");
+  if (provider === "cloudflare_r2") {
+    client = new S3Client({
+      region: "auto",
+      endpoint: getR2Endpoint(),
+      credentials: {
+        accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+        secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+      },
+    });
+  } else {
+    client = new S3Client({
+      region: env.COS_REGION,
+      endpoint: getCosEndpoint(),
+      credentials: {
+        accessKeyId: env.COS_SECRET_ID,
+        secretAccessKey: env.COS_SECRET_KEY,
+      },
+    });
   }
-  client = new S3Client({
-    region: "auto",
-    endpoint: getR2Endpoint(),
-    credentials: {
-      accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-      secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-    },
-  });
+  clientProvider = provider;
   return client;
 }
 
@@ -67,16 +92,20 @@ export async function createPresignedUploadUrl(params: {
   headers: Record<string, string>;
   object_key: string;
   expires_in: number;
-  storage: "cloudflare_r2";
+  storage: ObjectStorageProvider;
   object_url: string | null;
 }> {
   const expiresIn = params.expiresIn ?? 600;
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
   const command = new PutObjectCommand({
-    Bucket: env.CLOUDFLARE_R2_BUCKET,
+    Bucket: getStorageBucket(provider),
     Key: params.objectKey,
     ContentType: params.contentType,
   });
-  const url = await getSignedUrl(getR2Client(), command, { expiresIn });
+  const url = await getSignedUrl(getStorageClient(), command, { expiresIn });
   return {
     method: "PUT",
     url,
@@ -85,7 +114,7 @@ export async function createPresignedUploadUrl(params: {
     },
     object_key: params.objectKey,
     expires_in: expiresIn,
-    storage: "cloudflare_r2",
+    storage: provider,
     object_url: buildPublicObjectUrl(params.objectKey),
   };
 }
@@ -95,9 +124,13 @@ export async function putObjectBuffer(params: {
   body: Buffer;
   contentType: string;
 }): Promise<void> {
-  await getR2Client().send(
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  await getStorageClient().send(
     new PutObjectCommand({
-      Bucket: env.CLOUDFLARE_R2_BUCKET,
+      Bucket: getStorageBucket(provider),
       Key: params.objectKey,
       Body: params.body,
       ContentType: params.contentType,
