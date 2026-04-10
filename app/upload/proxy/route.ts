@@ -6,6 +6,7 @@ import { requireApiAuth } from "@/lib/auth";
 import { hasObjectStorageConfig } from "@/lib/env";
 import { jsonResponse } from "@/lib/http";
 import { buildH5ObjectKey, putObjectReadableStream } from "@/lib/r2";
+import { SINGLE_PROXY_MAX_BYTES } from "@/lib/upload-multipart-session";
 import {
   decorateSubmissionObjectUrl,
   findParticipantByCodeAndOpenId,
@@ -46,6 +47,20 @@ export async function POST(request: NextRequest) {
   const contentTypeHeader = request.headers.get("content-type");
   const contentType = contentTypeHeader?.split(";")[0].trim() || "application/octet-stream";
 
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const n = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(n) && n > SINGLE_PROXY_MAX_BYTES) {
+      return jsonResponse(
+        {
+          error: "Payload too large",
+          detail: `单次中转上限约 ${SINGLE_PROXY_MAX_BYTES} 字节，请使用 H5 页自动分片或配置 COS CORS 直传。`,
+        },
+        413,
+      );
+    }
+  }
+
   const webBody = request.body;
   if (!webBody) {
     return jsonResponse({ error: "Empty body" }, 400);
@@ -71,7 +86,6 @@ export async function POST(request: NextRequest) {
   }
 
   const objectKey = buildH5ObjectKey(participantCode, fileName, contentType);
-  const contentLength = request.headers.get("content-length");
   let sizeBytes: number | null = null;
   if (contentLength) {
     const n = Number.parseInt(contentLength, 10);
