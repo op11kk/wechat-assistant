@@ -46,7 +46,12 @@ function uploadWithProgress(
       }
       onProgress(Math.round((event.loaded / event.total) * 100));
     };
-    xhr.onerror = () => reject(new Error("Upload request failed"));
+    xhr.onerror = () =>
+      reject(
+        new Error(
+          "浏览器直传失败（多为跨域）：请在对象存储控制台为当前站点配置 CORS，允许 PUT 与 Content-Type。",
+        ),
+      );
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(100);

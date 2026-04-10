@@ -6,7 +6,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   buildPublicObjectUrl,
   env,
-  getCosEndpoint,
+  getCosS3PathStyleEndpoint,
   getObjectStorageProvider,
   getR2Endpoint,
   ObjectStorageProvider,
@@ -42,15 +42,19 @@ function getStorageClient(): S3Client {
         accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
         secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
       },
+      // 避免预签名 URL 带上 CRC 等参数，浏览器直传只发 Content-Type 时与部分 S3 兼容端（含 COS）更稳
+      requestChecksumCalculation: "WHEN_REQUIRED",
     });
   } else {
     client = new S3Client({
       region: env.COS_REGION,
-      endpoint: getCosEndpoint(),
+      endpoint: getCosS3PathStyleEndpoint(),
       credentials: {
         accessKeyId: env.COS_SECRET_ID,
         secretAccessKey: env.COS_SECRET_KEY,
       },
+      forcePathStyle: true,
+      requestChecksumCalculation: "WHEN_REQUIRED",
     });
   }
   clientProvider = provider;
