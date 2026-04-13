@@ -52,6 +52,7 @@ export function parseWechatInboundXml(xml: string): {
   mediaId: string | null;
   description: string | null;
   event: string | null;
+  eventKey: string | null;
   content: string | null;
 } {
   return {
@@ -61,6 +62,7 @@ export function parseWechatInboundXml(xml: string): {
     mediaId: extractXmlTag(xml, "MediaId"),
     description: extractXmlTag(xml, "Description"),
     event: extractXmlTag(xml, "Event"),
+    eventKey: extractXmlTag(xml, "EventKey"),
     content: extractXmlTag(xml, "Content"),
   };
 }

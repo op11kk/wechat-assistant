@@ -18,7 +18,7 @@ function getWechatSignatureParams(request: NextRequest) {
     signature: searchParams.get("signature")?.trim() ?? "",
     timestamp: searchParams.get("timestamp")?.trim() ?? "",
     nonce: searchParams.get("nonce")?.trim() ?? "",
-    echostr: searchParams.get("echostr"),
+    echostr: searchParams.get("echostr")?.trim() ?? "",
   };
 }
 
@@ -36,7 +36,8 @@ function logWechatRequest(
     hasSignature: Boolean(params.signature),
     hasTimestamp: Boolean(params.timestamp),
     hasNonce: Boolean(params.nonce),
-    hasEchostr: params.echostr !== null,
+    hasEchostr: Boolean(params.echostr?.trim()),
+    signaturePreview: params.signature ? `${params.signature.slice(0, 12)}…` : null,
     ...extra,
   });
 }
@@ -44,6 +45,14 @@ function logWechatRequest(
 function isHelpTextKeyword(raw: string | null | undefined): boolean {
   const s = raw?.trim().toLowerCase() ?? "";
   return s === "openid" || s === "帮助" || s === "help" || s === "?" || s === "？";
+}
+
+function isOpenIdHintEvent(msgType: string, event: string | null | undefined): boolean {
+  if (msgType !== "event") {
+    return false;
+  }
+  const normalized = event?.trim().toLowerCase() ?? "";
+  return normalized === "subscribe" || normalized === "scan";
 }
 
 function openIdRegistrationTip(userOpenid: string): string {
@@ -57,23 +66,48 @@ export async function GET(request: NextRequest) {
   }
   const { signature, timestamp, nonce, echostr } = getWechatSignatureParams(request);
   logWechatRequest("get_received", request, { signature, timestamp, nonce, echostr });
-  if (!signature || !timestamp || !nonce || echostr === null) {
-    console.warn("[wechat] GET missing required query params");
+  const missing: string[] = [];
+  if (!signature) {
+    missing.push("signature");
+  }
+  if (!timestamp) {
+    missing.push("timestamp");
+  }
+  if (!nonce) {
+    missing.push("nonce");
+  }
+  if (!echostr.trim()) {
+    missing.push("echostr");
+  }
+  if (missing.length > 0) {
+    console.warn("[wechat] GET missing query params (browser direct open is expected)", {
+      missing,
+      hint: "WeChat sends GET /api/wechat?signature&timestamp&nonce&echostr for URL verification.",
+    });
     return jsonResponse(
       {
         error: "Missing query params",
-        detail: "signature, timestamp, nonce, echostr are required for WeChat URL verification.",
+        detail:
+          "微信公众平台 URL 校验需要同时提供 signature、timestamp、nonce、echostr。浏览器直接打开本地址不会带这些参数，返回 400 属正常；请用后台「提交」或由脚本模拟请求。",
+        missing,
       },
       400,
     );
   }
+  const echostrTrimmed = echostr.trim();
+  console.info("[wechat] GET query preview", {
+    signaturePrefix: `${signature.slice(0, 8)}…`,
+    timestamp,
+    nonce,
+    echostrLength: echostrTrimmed.length,
+  });
   const signatureOk = verifyWechatSignature(signature, timestamp, nonce);
   if (!signatureOk) {
     console.warn("[wechat] GET signature mismatch", wechatSignatureDebug(signature, timestamp, nonce));
     return textResponse("Forbidden", 403);
   }
-  console.info("[wechat] GET signature verified");
-  return textResponse(echostr);
+  console.info("[wechat] GET signature verified, returning echostr");
+  return textResponse(echostrTrimmed);
 }
 
 export async function POST(request: NextRequest) {
@@ -81,8 +115,9 @@ export async function POST(request: NextRequest) {
     console.error("[wechat] POST missing WECHAT_TOKEN");
     return jsonResponse({ error: "WECHAT_TOKEN not configured" }, 503);
   }
-  const { signature, timestamp, nonce } = getWechatSignatureParams(request);
-  logWechatRequest("post_received", request, { signature, timestamp, nonce, echostr: null }, {
+  const params = getWechatSignatureParams(request);
+  const { signature, timestamp, nonce } = params;
+  logWechatRequest("post_received", request, params, {
     contentType: request.headers.get("content-type"),
     contentLength: request.headers.get("content-length"),
   });
@@ -113,6 +148,8 @@ export async function POST(request: NextRequest) {
   console.info("[wechat] POST parsed inbound", {
     msgType: inbound.msgType,
     event: inbound.event,
+    eventKey: inbound.eventKey,
+    contentPreview: inbound.content?.slice(0, 32) ?? null,
     hasOpenid: Boolean(userOpenid),
     hasOfficialId: Boolean(officialId),
     hasMediaId: Boolean(inbound.mediaId),
@@ -120,10 +157,16 @@ export async function POST(request: NextRequest) {
   const wantsOpenidHint =
     userOpenid &&
     officialId &&
-    ((inbound.msgType === "event" && inbound.event?.toLowerCase() === "subscribe") ||
+    (isOpenIdHintEvent(inbound.msgType, inbound.event) ||
       (inbound.msgType === "text" && isHelpTextKeyword(inbound.content)));
   if (wantsOpenidHint && userOpenid && officialId) {
-    console.info("[wechat] POST replying with openid hint");
+    console.info("[wechat] POST replying with openid hint", {
+      reason:
+        inbound.msgType === "text"
+          ? "help_keyword"
+          : (inbound.event?.trim().toLowerCase() ?? "event"),
+      eventKey: inbound.eventKey,
+    });
     return xmlResponse(
       buildWechatPassiveTextReply({
         toUserOpenid: userOpenid,
