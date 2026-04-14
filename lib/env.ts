@@ -73,10 +73,10 @@ export function getR2Endpoint(): string {
  * COS_BUCKET 须与控制台「存储桶名称」完全一致，一般为「自定义前缀-APPID」单段，勿重复拼接两段。
  */
 export function getCosEndpoint(): string {
-  if (!env.COS_REGION || !env.COS_BUCKET) {
-    throw new Error("Missing COS_REGION or COS_BUCKET");
+  if (!env.COS_REGION) {
+    throw new Error("Missing COS_REGION");
   }
-  return `https://${env.COS_BUCKET}.cos.${env.COS_REGION}.myqcloud.com`;
+  return `https://cos.${env.COS_REGION}.myqcloud.com`;
 }
 
 export function getSupabaseProjectRef(): string | null {
