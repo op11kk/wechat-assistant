@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 
-import { requireApiAuth } from "@/lib/auth";
 import { hasObjectStorageConfig } from "@/lib/env";
 import { jsonResponse } from "@/lib/http";
 import { buildH5ObjectKey, createPresignedUploadUrl } from "@/lib/r2";
@@ -9,10 +8,6 @@ import { findParticipantByCodeAndOpenId } from "@/lib/video-submissions";
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
-  const unauthorized = requireApiAuth(request);
-  if (unauthorized) {
-    return unauthorized;
-  }
   if (!hasObjectStorageConfig()) {
     return jsonResponse(
       {

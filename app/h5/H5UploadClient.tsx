@@ -67,7 +67,7 @@ function uploadWithProgress(
 /** 同源 POST 到 /upload/proxy，由服务端写入 COS + Supabase，绕过浏览器对 COS 的 CORS。 */
 function uploadViaServerProxy(
   file: File,
-  params: { participantCode: string; wechatOpenid: string; apiSecret: string; comment: string },
+  params: { participantCode: string; wechatOpenid: string; comment: string },
   onProgress: (value: number) => void,
 ): Promise<unknown> {
   const contentType = file.type || "video/mp4";
@@ -77,9 +77,6 @@ function uploadViaServerProxy(
     "X-Wechat-Openid": params.wechatOpenid.trim(),
     "X-File-Name": encodeURIComponent(file.name),
   };
-  if (params.apiSecret.trim()) {
-    headers.Authorization = `Bearer ${params.apiSecret.trim()}`;
-  }
   if (params.comment.trim()) {
     headers["X-User-Comment"] = encodeURIComponent(params.comment.trim());
   }
@@ -113,7 +110,6 @@ function uploadViaServerProxy(
 export default function H5UploadClient() {
   const [participantCode, setParticipantCode] = useState("");
   const [wechatOpenid, setWechatOpenid] = useState("");
-  const [apiSecret, setApiSecret] = useState("");
   const [comment, setComment] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
@@ -127,13 +123,9 @@ export default function H5UploadClient() {
   };
 
   const apiHeaders = () => {
-    const headers: Record<string, string> = {
+    return {
       "Content-Type": "application/json",
     };
-    if (apiSecret.trim()) {
-      headers.Authorization = `Bearer ${apiSecret.trim()}`;
-    }
-    return headers;
   };
 
   const handleSubmit = () => {
@@ -163,7 +155,6 @@ export default function H5UploadClient() {
             {
               participantCode: participantCode.trim(),
               wechatOpenid: wechatOpenid.trim(),
-              apiSecret: apiSecret.trim(),
               comment: comment.trim(),
             },
             setProgress,
@@ -286,17 +277,6 @@ export default function H5UploadClient() {
               />{" "}
               经服务器同源中转（免 COS 跨域；大于约 4.5MB 请取消勾选改用直传）
             </label>
-          </div>
-
-          <div className="field field-full">
-            <label htmlFor="apiSecret">API_SECRET</label>
-            <input
-              id="apiSecret"
-              value={apiSecret}
-              onChange={(event) => setApiSecret(event.target.value)}
-              placeholder="如果服务端配置了 API_SECRET，这里填同一个值"
-            />
-            <p className="field-hint">未配置 API_SECRET 时可以留空。</p>
           </div>
 
           <div className="field field-full">

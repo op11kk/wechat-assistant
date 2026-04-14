@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 
-import { requireApiAuth } from "@/lib/auth";
 import { jsonResponse } from "@/lib/http";
 import {
   decorateSubmissionObjectUrl,
@@ -13,10 +12,6 @@ import {
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
-  const unauthorized = requireApiAuth(request);
-  if (unauthorized) {
-    return unauthorized;
-  }
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {
     return jsonResponse({ error: "Invalid JSON body" }, 400);

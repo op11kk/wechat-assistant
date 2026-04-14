@@ -2,7 +2,6 @@ import { Readable } from "node:stream";
 
 import { NextRequest } from "next/server";
 
-import { requireApiAuth } from "@/lib/auth";
 import { hasObjectStorageConfig } from "@/lib/env";
 import { jsonResponse } from "@/lib/http";
 import { buildH5ObjectKey, putObjectReadableStream } from "@/lib/r2";
@@ -18,10 +17,6 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
-  const unauthorized = requireApiAuth(request);
-  if (unauthorized) {
-    return unauthorized;
-  }
   if (!hasObjectStorageConfig()) {
     return jsonResponse({ error: "Object storage not configured" }, 503);
   }
