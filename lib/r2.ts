@@ -23,6 +23,14 @@ const EXT_BY_CONTENT_TYPE: Record<string, string> = {
 let client: S3Client | null = null;
 let clientProvider: ObjectStorageProvider | null = null;
 
+function getDefaultPresignedUploadExpiresIn(): number {
+  const raw = Number.parseInt(env.UPLOAD_PRESIGN_EXPIRES_IN || "1800", 10);
+  if (!Number.isFinite(raw)) {
+    return 1800;
+  }
+  return Math.min(Math.max(raw, 300), 3600);
+}
+
 function getStorageBucket(provider: ObjectStorageProvider): string {
   return provider === "cloudflare_r2" ? env.CLOUDFLARE_R2_BUCKET : env.COS_BUCKET;
 }
@@ -100,7 +108,7 @@ export async function createPresignedUploadUrl(params: {
   storage: ObjectStorageProvider;
   object_url: string | null;
 }> {
-  const expiresIn = params.expiresIn ?? 600;
+  const expiresIn = params.expiresIn ?? getDefaultPresignedUploadExpiresIn();
   const provider = getObjectStorageProvider();
   if (!provider) {
     throw new Error("Object storage is not configured");
