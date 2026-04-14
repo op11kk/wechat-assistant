@@ -47,62 +47,15 @@ function uploadWithProgress(
       onProgress(Math.round((event.loaded / event.total) * 100));
     };
     xhr.onerror = () =>
-      reject(
-        new Error(
-          "浏览器直传失败（多为跨域）：请在对象存储控制台为当前站点配置 CORS，允许 PUT 与 Content-Type。",
-        ),
-      );
+      reject(new Error("浏览器直传失败：请检查网络，或确认 COS 已为当前站点配置 CORS。"));
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(100);
         resolve();
         return;
       }
-        reject(new Error(`直传 PUT 失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
+      reject(new Error(`直传 PUT 失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
     };
-    xhr.send(file);
-  });
-}
-
-/** 同源 POST 到 /upload/proxy，由服务端写入 COS + Supabase，绕过浏览器对 COS 的 CORS。 */
-function uploadViaServerProxy(
-  file: File,
-  params: { participantCode: string; wechatOpenid: string; comment: string },
-  onProgress: (value: number) => void,
-): Promise<unknown> {
-  const contentType = file.type || "video/mp4";
-  const headers: Record<string, string> = {
-    "Content-Type": contentType,
-    "X-Participant-Code": params.participantCode.trim(),
-    "X-Wechat-Openid": params.wechatOpenid.trim(),
-    "X-File-Name": encodeURIComponent(file.name),
-  };
-  if (params.comment.trim()) {
-    headers["X-User-Comment"] = encodeURIComponent(params.comment.trim());
-  }
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/upload/proxy", true);
-    Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) {
-        return;
-      }
-      onProgress(Math.round((event.loaded / event.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress(100);
-        try {
-          resolve(JSON.parse(xhr.responseText) as unknown);
-        } catch {
-          resolve(xhr.responseText);
-        }
-        return;
-      }
-      reject(new Error(`中转上传失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 500)}`));
-    };
-    xhr.onerror = () => reject(new Error("中转上传网络错误（请检查网络或 Vercel 限制）"));
     xhr.send(file);
   });
 }
@@ -115,17 +68,9 @@ export default function H5UploadClient() {
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [isPending, startTransition] = useTransition();
-  /** 不经浏览器直传 COS，避免 COS CORS；大文件受 Vercel 请求体限制。 */
-  const [useServerProxy, setUseServerProxy] = useState(true);
 
   const appendLog = (type: LogLine["type"], value: unknown) => {
     setLogs((current) => [...current, { type, text: formatLogValue(value) }]);
-  };
-
-  const apiHeaders = () => {
-    return {
-      "Content-Type": "application/json",
-    };
   };
 
   const handleSubmit = () => {
@@ -144,32 +89,12 @@ export default function H5UploadClient() {
 
       const contentType = file.type || "video/mp4";
 
-      if (useServerProxy) {
-        appendLog(
-          "info",
-          "经服务器同源中转（POST /upload/proxy → 对象存储 + 回写库，无需 COS CORS）。单请求体积受 Vercel 约 4.5MB 限制，更大请取消勾选改用预签名直传。",
-        );
-        try {
-          const result = await uploadViaServerProxy(
-            file,
-            {
-              participantCode: participantCode.trim(),
-              wechatOpenid: wechatOpenid.trim(),
-              comment: comment.trim(),
-            },
-            setProgress,
-          );
-          appendLog("success", result);
-        } catch (error) {
-          appendLog("error", String(error));
-        }
-        return;
-      }
-
       appendLog("info", "1/3 请求对象存储预签名。");
       const presignResponse = await fetch("/upload/presign", {
         method: "POST",
-        headers: apiHeaders(),
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           participant_code: participantCode.trim(),
           wechat_openid: wechatOpenid.trim(),
@@ -186,6 +111,7 @@ export default function H5UploadClient() {
 
       const presign = (await presignResponse.json()) as PresignResponse;
       appendLog("info", presign);
+
       const uploadUrl = presign.upload_url ?? presign.url;
       if (!uploadUrl) {
         appendLog("error", "预签名响应缺少 url 字段。");
@@ -213,7 +139,9 @@ export default function H5UploadClient() {
 
       const completeResponse = await fetch("/upload/complete", {
         method: "POST",
-        headers: apiHeaders(),
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           participant_code: participantCode.trim(),
           wechat_openid: wechatOpenid.trim(),
@@ -239,11 +167,13 @@ export default function H5UploadClient() {
     <main className="upload-shell">
       <section className="upload-panel">
         <header className="upload-header">
-          <p className="eyebrow">H5 直传</p>
+          <p className="eyebrow">H5 上传</p>
           <h1>大视频上传页</h1>
           <p>
-            默认<strong>经本站同源中转</strong>（<code>POST /upload/proxy</code>），无需 COS CORS；单文件大小受 Vercel 请求体上限（约 4.5MB）约束。
-            取消勾选可改为<strong>预签名直传</strong>（适合大视频，需在 COS 配置 CORS）。参与者须为 <code>active</code>。
+            当前页面默认使用
+            <strong>对象存储直传</strong>
+            。视频文件会直接上传到腾讯云 COS，再回写投稿记录。参与者需先完成登记，且状态为
+            <code>active</code>。
           </p>
         </header>
 
@@ -264,19 +194,8 @@ export default function H5UploadClient() {
               id="wechatOpenid"
               value={wechatOpenid}
               onChange={(event) => setWechatOpenid(event.target.value)}
-              placeholder="微信 openid"
+              placeholder="管理员提供的微信 openid"
             />
-          </div>
-
-          <div className="field field-full">
-            <label className="field-checkbox">
-              <input
-                checked={useServerProxy}
-                onChange={(event) => setUseServerProxy(event.target.checked)}
-                type="checkbox"
-              />{" "}
-              经服务器同源中转（免 COS 跨域；大于约 4.5MB 请取消勾选改用直传）
-            </label>
           </div>
 
           <div className="field field-full">
