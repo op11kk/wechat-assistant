@@ -12,6 +12,34 @@ const tokenCache: WechatTokenCache = {
   deadline: 0,
 };
 
+const WECHAT_TOKEN_TIMEOUT_MS = 10_000;
+const WECHAT_MEDIA_TIMEOUT_MS = 90_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    console.error(`${label} failed`, {
+      name: error instanceof Error ? error.name : null,
+      message: error instanceof Error ? error.message : String(error),
+      timeoutMs,
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function extractXmlTag(xml: string, tagName: string): string | null {
   const cdataPattern = new RegExp(`<${tagName}><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tagName}>`, "i");
   const cdataMatch = xml.match(cdataPattern);
@@ -90,9 +118,15 @@ export async function getWechatAccessToken(): Promise<string | null> {
     appid: env.WECHAT_APP_ID,
     secret: env.WECHAT_APP_SECRET,
   });
-  const response = await fetch(`https://api.weixin.qq.com/cgi-bin/token?${query.toString()}`, {
-    cache: "no-store",
-  });
+  console.info("wechat token request started");
+  const response = await fetchWithTimeout(
+    `https://api.weixin.qq.com/cgi-bin/token?${query.toString()}`,
+    {
+      cache: "no-store",
+    },
+    WECHAT_TOKEN_TIMEOUT_MS,
+    "wechat token request",
+  );
   const payload = (await response.json()) as { access_token?: string; expires_in?: number };
   if (!response.ok || !payload.access_token) {
     console.error("wechat token request failed", payload);
@@ -101,6 +135,7 @@ export async function getWechatAccessToken(): Promise<string | null> {
   const expires = payload.expires_in ?? 7200;
   tokenCache.token = payload.access_token;
   tokenCache.deadline = now + Math.max(120_000, (expires - 300) * 1000);
+  console.info("wechat token request succeeded", { expiresIn: expires });
   return tokenCache.token;
 }
 
@@ -116,9 +151,15 @@ export async function downloadWechatMedia(mediaId: string): Promise<{
     access_token: token,
     media_id: mediaId,
   });
-  const response = await fetch(`https://api.weixin.qq.com/cgi-bin/media/get?${query.toString()}`, {
-    cache: "no-store",
-  });
+  console.info("wechat media download started", { mediaId });
+  const response = await fetchWithTimeout(
+    `https://api.weixin.qq.com/cgi-bin/media/get?${query.toString()}`,
+    {
+      cache: "no-store",
+    },
+    WECHAT_MEDIA_TIMEOUT_MS,
+    "wechat media download",
+  );
   const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "video/mp4";
   const body = Buffer.from(await response.arrayBuffer());
   if (!response.ok) {
@@ -129,6 +170,11 @@ export async function downloadWechatMedia(mediaId: string): Promise<{
     console.error("wechat media download returned json", body.toString("utf8").slice(0, 400));
     return null;
   }
+  console.info("wechat media download completed", {
+    mediaId,
+    contentType,
+    sizeBytes: body.length,
+  });
   return {
     body,
     contentType,

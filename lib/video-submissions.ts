@@ -136,11 +136,18 @@ export async function syncWechatMediaToR2(
     return;
   }
   const objectKey = buildChatObjectKey(participantCode, submissionId, download.contentType);
+  console.info("wechat media cos upload started", {
+    submissionId,
+    objectKey,
+    sizeBytes: download.body.length,
+    contentType: download.contentType,
+  });
   await putObjectBuffer({
     objectKey,
     body: download.body,
     contentType: download.contentType,
   });
+  console.info("wechat media cos upload completed", { submissionId, objectKey });
   const patch = {
     object_key: objectKey,
     size_bytes: download.body.length,

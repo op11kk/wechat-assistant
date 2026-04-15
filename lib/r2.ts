@@ -29,6 +29,19 @@ const EXT_BY_CONTENT_TYPE: Record<string, string> = {
 
 let client: S3Client | null = null;
 let clientProvider: ObjectStorageProvider | null = null;
+const OBJECT_STORAGE_PUT_TIMEOUT_MS = 90_000;
+
+async function sendStorageCommandWithTimeout(command: PutObjectCommand): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OBJECT_STORAGE_PUT_TIMEOUT_MS);
+  try {
+    await getStorageClient().send(command, {
+      abortSignal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function getDefaultPresignedUploadExpiresIn(): number {
   const raw = Number.parseInt(env.UPLOAD_PRESIGN_EXPIRES_IN || "1800", 10);
@@ -148,7 +161,7 @@ export async function putObjectBuffer(params: {
   if (!provider) {
     throw new Error("Object storage is not configured");
   }
-  await getStorageClient().send(
+  await sendStorageCommandWithTimeout(
     new PutObjectCommand({
       Bucket: getStorageBucket(provider),
       Key: params.objectKey,
@@ -167,7 +180,7 @@ export async function putObjectReadableStream(params: {
   if (!provider) {
     throw new Error("Object storage is not configured");
   }
-  await getStorageClient().send(
+  await sendStorageCommandWithTimeout(
     new PutObjectCommand({
       Bucket: getStorageBucket(provider),
       Key: params.objectKey,
