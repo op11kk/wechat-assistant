@@ -241,6 +241,36 @@ async function handleMediaSync(req, res) {
     });
     return;
   }
+  jsonResponse(res, 202, {
+    message: "accepted",
+    request_id: requestId,
+    submission_id: submissionId,
+  });
+  void processMediaSync({
+    requestId,
+    submissionId,
+    mediaId,
+    participantCode,
+  }).catch(async (error) => {
+    console.error("worker media sync failed", {
+      requestId,
+      submissionId,
+      name: error instanceof Error ? error.name : null,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    await updateSubmission(submissionId, {
+      user_comment: `worker sync failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500),
+    }).catch((updateError) => {
+      console.error("worker failure update failed", {
+        requestId,
+        submissionId,
+        message: updateError instanceof Error ? updateError.message : String(updateError),
+      });
+    });
+  });
+}
+
+async function processMediaSync({ requestId, submissionId, mediaId, participantCode }) {
   console.info("worker media sync started", {
     requestId,
     submissionId,
@@ -262,15 +292,6 @@ async function handleMediaSync(req, res) {
     objectKey,
     sizeBytes: download.body.length,
     contentType: download.contentType,
-  });
-  jsonResponse(res, 200, {
-    message: "ok",
-    request_id: requestId,
-    submission_id: submissionId,
-    object_key: objectKey,
-    object_url: objectUrl,
-    size_bytes: download.body.length,
-    mime: download.contentType,
   });
 }
 
