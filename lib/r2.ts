@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Readable as NodeReadable } from "node:stream";
 
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
+  PutObjectCommand,
+  S3Client,
+  UploadPartCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import {
@@ -166,6 +173,131 @@ export async function putObjectReadableStream(params: {
       Key: params.objectKey,
       Body: params.body,
       ContentType: params.contentType,
+    }),
+  );
+}
+
+export async function createMultipartUpload(params: {
+  objectKey: string;
+  contentType: string;
+}): Promise<{
+  uploadId: string;
+  storage: ObjectStorageProvider;
+  object_key: string;
+  object_url: string | null;
+}> {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  const response = await getStorageClient().send(
+    new CreateMultipartUploadCommand({
+      Bucket: getStorageBucket(provider),
+      Key: params.objectKey,
+      ContentType: params.contentType,
+    }),
+  );
+  if (!response.UploadId) {
+    throw new Error("Multipart upload did not return UploadId");
+  }
+  return {
+    uploadId: response.UploadId,
+    storage: provider,
+    object_key: params.objectKey,
+    object_url: buildPublicObjectUrl(params.objectKey),
+  };
+}
+
+export async function createPresignedUploadPartUrl(params: {
+  objectKey: string;
+  uploadId: string;
+  partNumber: number;
+  expiresIn?: number;
+}): Promise<{
+  method: "PUT";
+  url: string;
+  headers: Record<string, string>;
+  object_key: string;
+  upload_id: string;
+  part_number: number;
+  expires_in: number;
+  storage: ObjectStorageProvider;
+}> {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  const expiresIn = params.expiresIn ?? getDefaultPresignedUploadExpiresIn();
+  const command = new UploadPartCommand({
+    Bucket: getStorageBucket(provider),
+    Key: params.objectKey,
+    UploadId: params.uploadId,
+    PartNumber: params.partNumber,
+  });
+  const url = await getSignedUrl(getStorageClient(), command, { expiresIn });
+  return {
+    method: "PUT",
+    url,
+    headers: {},
+    object_key: params.objectKey,
+    upload_id: params.uploadId,
+    part_number: params.partNumber,
+    expires_in: expiresIn,
+    storage: provider,
+  };
+}
+
+export async function completeMultipartUpload(params: {
+  objectKey: string;
+  uploadId: string;
+  parts: Array<{ part_number: number; etag: string }>;
+}): Promise<{
+  object_key: string;
+  object_url: string | null;
+}> {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  const normalizedParts = params.parts
+    .filter((part) => Number.isInteger(part.part_number) && part.part_number > 0 && part.etag.trim())
+    .sort((a, b) => a.part_number - b.part_number)
+    .map((part) => ({
+      ETag: part.etag,
+      PartNumber: part.part_number,
+    }));
+  if (normalizedParts.length === 0) {
+    throw new Error("Multipart complete requires at least one uploaded part");
+  }
+  await getStorageClient().send(
+    new CompleteMultipartUploadCommand({
+      Bucket: getStorageBucket(provider),
+      Key: params.objectKey,
+      UploadId: params.uploadId,
+      MultipartUpload: {
+        Parts: normalizedParts,
+      },
+    }),
+  );
+  return {
+    object_key: params.objectKey,
+    object_url: buildPublicObjectUrl(params.objectKey),
+  };
+}
+
+export async function abortMultipartUpload(params: {
+  objectKey: string;
+  uploadId: string;
+}): Promise<void> {
+  const provider = getObjectStorageProvider();
+  if (!provider) {
+    throw new Error("Object storage is not configured");
+  }
+  await getStorageClient().send(
+    new AbortMultipartUploadCommand({
+      Bucket: getStorageBucket(provider),
+      Key: params.objectKey,
+      UploadId: params.uploadId,
     }),
   );
 }
