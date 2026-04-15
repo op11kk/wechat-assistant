@@ -1,3 +1,5 @@
+import { after } from "next/server";
+
 import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
@@ -120,10 +122,17 @@ export async function syncWechatMediaToR2(
   participantCode: string,
 ): Promise<void> {
   if (!hasObjectStorageConfig() || !hasWechatMediaConfig()) {
+    console.warn("wechat media sync skipped because storage or wechat media config is missing", {
+      submissionId,
+      hasObjectStorageConfig: hasObjectStorageConfig(),
+      hasWechatMediaConfig: hasWechatMediaConfig(),
+    });
     return;
   }
+  console.info("wechat media sync started", { submissionId, mediaId, participantCode });
   const download = await downloadWechatMedia(mediaId);
   if (!download) {
+    console.warn("wechat media sync skipped because media download failed", { submissionId, mediaId });
     return;
   }
   const objectKey = buildChatObjectKey(participantCode, submissionId, download.contentType);
@@ -143,7 +152,14 @@ export async function syncWechatMediaToR2(
     .eq("id", submissionId);
   if (error) {
     console.error("video_submissions update failed", error.message);
+    return;
   }
+  console.info("wechat media sync completed", {
+    submissionId,
+    objectKey,
+    sizeBytes: download.body.length,
+    contentType: download.contentType,
+  });
 }
 
 export type ChatVideoIngestResult =
@@ -192,8 +208,12 @@ export async function ingestChatVideoWechat(params: {
   if (!Number.isFinite(submissionId)) {
     return { ok: false, reason: "insert_failed", detail: "invalid submission id" };
   }
-  void syncWechatMediaToR2(submissionId, params.mediaId, participant.participant_code).catch((error) => {
-    console.error("wechat media sync failed", error);
+  after(async () => {
+    try {
+      await syncWechatMediaToR2(submissionId, params.mediaId, participant.participant_code);
+    } catch (error) {
+      console.error("wechat media sync failed", error);
+    }
   });
   return { ok: true, submissionId };
 }
