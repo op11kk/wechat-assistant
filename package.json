@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "worker:wechat-media": "node workers/wechat-media-worker.mjs",
     "wechat:simulate-get": "node scripts/wechat-simulate-url-verify.cjs"
   },
   "dependencies": {

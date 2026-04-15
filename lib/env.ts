@@ -22,6 +22,9 @@ export const env = {
   COS_REGION: readEnv("COS_REGION"),
   COS_BUCKET: readEnv("COS_BUCKET"),
   COS_PUBLIC_BASE_URL: readEnv("COS_PUBLIC_BASE_URL"),
+  WECHAT_MEDIA_WORKER_URL: readEnv("WECHAT_MEDIA_WORKER_URL"),
+  WECHAT_MEDIA_WORKER_SECRET: readEnv("WECHAT_MEDIA_WORKER_SECRET"),
+  WECHAT_MEDIA_WORKER_TIMEOUT_MS: readEnv("WECHAT_MEDIA_WORKER_TIMEOUT_MS"),
 };
 
 export function assertSupabaseEnv(): void {
@@ -50,6 +53,18 @@ export function hasObjectStorageConfig(): boolean {
 
 export function hasWechatMediaConfig(): boolean {
   return Boolean(env.WECHAT_APP_ID && env.WECHAT_APP_SECRET);
+}
+
+export function hasWechatMediaWorkerConfig(): boolean {
+  return Boolean(env.WECHAT_MEDIA_WORKER_URL && env.WECHAT_MEDIA_WORKER_SECRET);
+}
+
+export function getWechatMediaWorkerTimeoutMs(): number {
+  const raw = Number.parseInt(env.WECHAT_MEDIA_WORKER_TIMEOUT_MS || "10000", 10);
+  if (!Number.isFinite(raw)) {
+    return 10_000;
+  }
+  return Math.min(Math.max(raw, 3_000), 60_000);
 }
 
 export function getObjectStorageProvider(): ObjectStorageProvider | null {

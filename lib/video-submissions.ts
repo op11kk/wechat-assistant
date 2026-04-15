@@ -1,6 +1,13 @@
 import { after } from "next/server";
 
-import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
+import {
+  buildPublicObjectUrl,
+  env,
+  getWechatMediaWorkerTimeoutMs,
+  hasObjectStorageConfig,
+  hasWechatMediaConfig,
+  hasWechatMediaWorkerConfig,
+} from "@/lib/env";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -169,6 +176,72 @@ export async function syncWechatMediaToR2(
   });
 }
 
+async function dispatchWechatMediaWorker(params: {
+  submissionId: number;
+  mediaId: string;
+  participantCode: string;
+}): Promise<void> {
+  const timeoutMs = getWechatMediaWorkerTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    console.info("wechat media worker dispatch started", {
+      submissionId: params.submissionId,
+      participantCode: params.participantCode,
+      timeoutMs,
+    });
+    const response = await fetch(env.WECHAT_MEDIA_WORKER_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.WECHAT_MEDIA_WORKER_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        submission_id: params.submissionId,
+        media_id: params.mediaId,
+        participant_code: params.participantCode,
+      }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("wechat media worker dispatch failed", {
+        submissionId: params.submissionId,
+        status: response.status,
+        body: text.slice(0, 500),
+      });
+      return;
+    }
+    console.info("wechat media worker dispatch completed", {
+      submissionId: params.submissionId,
+      status: response.status,
+      body: text.slice(0, 500),
+    });
+  } catch (error) {
+    console.error("wechat media worker dispatch error", {
+      submissionId: params.submissionId,
+      name: error instanceof Error ? error.name : null,
+      message: error instanceof Error ? error.message : String(error),
+      timeoutMs,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function syncChatMedia(params: {
+  submissionId: number;
+  mediaId: string;
+  participantCode: string;
+}): Promise<void> {
+  if (hasWechatMediaWorkerConfig()) {
+    await dispatchWechatMediaWorker(params);
+    return;
+  }
+  await syncWechatMediaToR2(params.submissionId, params.mediaId, params.participantCode);
+}
+
 export type ChatVideoIngestResult =
   | { ok: true; submissionId: number }
   | {
@@ -217,7 +290,11 @@ export async function ingestChatVideoWechat(params: {
   }
   after(async () => {
     try {
-      await syncWechatMediaToR2(submissionId, params.mediaId, participant.participant_code);
+      await syncChatMedia({
+        submissionId,
+        mediaId: params.mediaId,
+        participantCode: participant.participant_code,
+      });
     } catch (error) {
       console.error("wechat media sync failed", error);
     }
