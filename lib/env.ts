@@ -25,6 +25,9 @@ export const env = {
   WECHAT_MEDIA_WORKER_URL: readEnv("WECHAT_MEDIA_WORKER_URL"),
   WECHAT_MEDIA_WORKER_SECRET: readEnv("WECHAT_MEDIA_WORKER_SECRET"),
   WECHAT_MEDIA_WORKER_TIMEOUT_MS: readEnv("WECHAT_MEDIA_WORKER_TIMEOUT_MS"),
+  WECHAT_INGEST_API_URL: readEnv("WECHAT_INGEST_API_URL"),
+  WECHAT_INGEST_API_SECRET: readEnv("WECHAT_INGEST_API_SECRET"),
+  WECHAT_INGEST_API_TIMEOUT_MS: readEnv("WECHAT_INGEST_API_TIMEOUT_MS"),
 };
 
 export function assertSupabaseEnv(): void {
@@ -59,8 +62,24 @@ export function hasWechatMediaWorkerConfig(): boolean {
   return Boolean(env.WECHAT_MEDIA_WORKER_URL && env.WECHAT_MEDIA_WORKER_SECRET);
 }
 
+export function hasWechatIngestApiConfig(): boolean {
+  return Boolean(env.WECHAT_INGEST_API_URL && (env.WECHAT_INGEST_API_SECRET || env.API_SECRET));
+}
+
 export function getWechatMediaWorkerTimeoutMs(): number {
   const raw = Number.parseInt(env.WECHAT_MEDIA_WORKER_TIMEOUT_MS || "10000", 10);
+  if (!Number.isFinite(raw)) {
+    return 10_000;
+  }
+  return Math.min(Math.max(raw, 3_000), 60_000);
+}
+
+export function getWechatIngestApiSecret(): string {
+  return env.WECHAT_INGEST_API_SECRET || env.API_SECRET;
+}
+
+export function getWechatIngestApiTimeoutMs(): number {
+  const raw = Number.parseInt(env.WECHAT_INGEST_API_TIMEOUT_MS || "10000", 10);
   if (!Number.isFinite(raw)) {
     return 10_000;
   }

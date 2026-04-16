@@ -1,8 +1,8 @@
-import { NextRequest } from "next/server";
+import { after, NextRequest } from "next/server";
 
-import { env } from "@/lib/env";
+import { env, hasWechatIngestApiConfig } from "@/lib/env";
 import { jsonResponse, textResponse, xmlResponse } from "@/lib/http";
-import { ingestChatVideoWechat } from "@/lib/video-submissions";
+import { dispatchWechatMediaWorker, ingestChatVideoWechat, ingestChatVideoWechatViaApi } from "@/lib/video-submissions";
 import {
   buildWechatPassiveTextReply,
   parseWechatInboundXml,
@@ -57,6 +57,26 @@ function isOpenIdHintEvent(msgType: string, event: string | null | undefined): b
 
 function openIdRegistrationTip(userOpenid: string): string {
   return `登记用 OpenID：\n${userOpenid}\n\n请将 OpenID、真实姓名、手机号交给管理员调用 POST /participants 录入；录入后再向本号发送视频或小视频即可收录。\n\n也可使用网站上的「大视频上传」页（H5 直传，需对象存储配置）。`;
+}
+
+async function ingestVideoAfterReply(params: {
+  openid: string;
+  mediaId: string;
+  userComment?: string | null;
+}) {
+  const result = hasWechatIngestApiConfig()
+    ? await ingestChatVideoWechatViaApi(params)
+    : await ingestChatVideoWechat(params);
+
+  console.info("[wechat] async video ingest result", result);
+  if (!result.ok || !hasWechatIngestApiConfig()) {
+    return;
+  }
+  await dispatchWechatMediaWorker({
+    submissionId: result.submissionId,
+    mediaId: params.mediaId,
+    participantCode: result.participantCode,
+  });
 }
 
 export async function GET(request: NextRequest) {
@@ -178,6 +198,30 @@ export async function POST(request: NextRequest) {
 
   if ((inbound.msgType === "video" || inbound.msgType === "shortvideo") && userOpenid && inbound.mediaId) {
     try {
+      if (hasWechatIngestApiConfig()) {
+        after(async () => {
+          try {
+            await ingestVideoAfterReply({
+              openid: userOpenid,
+              mediaId: inbound.mediaId!,
+              userComment: inbound.description,
+            });
+          } catch (error) {
+            console.error("[wechat] async video ingest error", error);
+          }
+        });
+        if (officialId) {
+          return xmlResponse(
+            buildWechatPassiveTextReply({
+              toUserOpenid: userOpenid,
+              fromOfficialUserName: officialId,
+              content: "已收到视频，正在处理，请稍后查看结果。",
+            }),
+          );
+        }
+        return textResponse("success");
+      }
+
       const result = await ingestChatVideoWechat({
         openid: userOpenid,
         mediaId: inbound.mediaId,

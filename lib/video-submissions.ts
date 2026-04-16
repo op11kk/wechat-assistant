@@ -3,7 +3,10 @@ import { after } from "next/server";
 import {
   buildPublicObjectUrl,
   env,
+  getWechatIngestApiSecret,
+  getWechatIngestApiTimeoutMs,
   getWechatMediaWorkerTimeoutMs,
+  hasWechatIngestApiConfig,
   hasObjectStorageConfig,
   hasWechatMediaConfig,
   hasWechatMediaWorkerConfig,
@@ -176,7 +179,7 @@ export async function syncWechatMediaToR2(
   });
 }
 
-async function dispatchWechatMediaWorker(params: {
+export async function dispatchWechatMediaWorker(params: {
   submissionId: number;
   mediaId: string;
   participantCode: string;
@@ -243,14 +246,14 @@ async function syncChatMedia(params: {
 }
 
 export type ChatVideoIngestResult =
-  | { ok: true; submissionId: number }
+  | { ok: true; submissionId: number; participantCode: string }
   | {
       ok: false;
       reason: "not_registered" | "participant_inactive" | "duplicate" | "insert_failed";
       detail?: string;
     };
 
-export async function ingestChatVideoWechat(params: {
+export async function createChatVideoWechatSubmission(params: {
   openid: string;
   mediaId: string;
   userComment?: string | null;
@@ -288,18 +291,84 @@ export async function ingestChatVideoWechat(params: {
   if (!Number.isFinite(submissionId)) {
     return { ok: false, reason: "insert_failed", detail: "invalid submission id" };
   }
+  return {
+    ok: true,
+    submissionId,
+    participantCode: participant.participant_code,
+  };
+}
+
+export async function ingestChatVideoWechat(params: {
+  openid: string;
+  mediaId: string;
+  userComment?: string | null;
+}): Promise<ChatVideoIngestResult> {
+  const result = await createChatVideoWechatSubmission(params);
+  if (!result.ok) {
+    return result;
+  }
   after(async () => {
     try {
       await syncChatMedia({
-        submissionId,
+        submissionId: result.submissionId,
         mediaId: params.mediaId,
-        participantCode: participant.participant_code,
+        participantCode: result.participantCode,
       });
     } catch (error) {
       console.error("wechat media sync failed", error);
     }
   });
-  return { ok: true, submissionId };
+  return result;
+}
+
+export async function ingestChatVideoWechatViaApi(params: {
+  openid: string;
+  mediaId: string;
+  userComment?: string | null;
+}): Promise<ChatVideoIngestResult> {
+  if (!hasWechatIngestApiConfig()) {
+    return {
+      ok: false,
+      reason: "insert_failed",
+      detail: "WECHAT_INGEST_API_URL or secret not configured",
+    };
+  }
+  const timeoutMs = getWechatIngestApiTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(env.WECHAT_INGEST_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${getWechatIngestApiSecret()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        openid: params.openid,
+        media_id: params.mediaId,
+        user_comment: params.userComment ?? null,
+      }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const payload = (await response.json().catch(() => null)) as ChatVideoIngestResult | { error?: string } | null;
+    if (!response.ok || !payload) {
+      return {
+        ok: false,
+        reason: "insert_failed",
+        detail: payload && "error" in payload ? payload.error : `remote ingest status ${response.status}`,
+      };
+    }
+    return payload as ChatVideoIngestResult;
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "insert_failed",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function decorateSubmissionObjectUrl<T extends { object_key?: string | null }>(row: T): T & {
