@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "iosbehind",
-  description: "Next.js + TypeScript video collection gateway for WeChat, Supabase and Cloudflare R2.",
+  title: "微信公众号视频上传 H5",
+  description: "基于 Next.js、PostgreSQL 和腾讯云 COS 的微信公众号视频上传页面。",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

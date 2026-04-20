@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { after, NextRequest } from "next/server";
 
 import { jsonResponse } from "@/lib/http";
 import { completeMultipartUpload } from "@/lib/r2";
@@ -6,10 +6,27 @@ import { getUploadSessionById, updateUploadSessionStatus, updateUploadSessionUpl
 import {
   decorateSubmissionObjectUrl,
   findExistingSubmissionForDedup,
+  findParticipantById,
   insertVideoSubmissionRow,
 } from "@/lib/video-submissions";
+import { sendWechatCustomTextMessage } from "@/lib/wechat";
 
 export const runtime = "nodejs";
+
+function buildUploadSuccessMessage(params: {
+  fileName: string | null;
+  objectUrl: string | null;
+}) {
+  const lines = ["Your video upload has been received. Current status: pending review."];
+  if (params.fileName) {
+    lines.push(`File: ${params.fileName}`);
+  }
+  if (params.objectUrl) {
+    lines.push(`Preview: ${params.objectUrl}`);
+  }
+  lines.push("You can return to the H5 page to view the latest review status.");
+  return lines.join("\n");
+}
 
 export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
@@ -43,10 +60,7 @@ export async function POST(request: NextRequest) {
         objectKey: session.object_key,
       });
       if (existing) {
-        return jsonResponse(
-          { message: "ok", submission: decorateSubmissionObjectUrl(existing), deduplicated: true },
-          200,
-        );
+        return jsonResponse({ message: "ok", submission: decorateSubmissionObjectUrl(existing), deduplicated: true });
       }
     }
     if (session.status !== "uploading") {
@@ -89,10 +103,32 @@ export async function POST(request: NextRequest) {
         status: "completed",
         completedAt: new Date().toISOString(),
       });
-      return jsonResponse(
-        { message: "ok", submission: decorateSubmissionObjectUrl(insertResult.submission) },
-        201,
-      );
+
+      const submission = insertResult.submission;
+      const decorated = decorateSubmissionObjectUrl(submission);
+
+      after(async () => {
+        try {
+          const participant = await findParticipantById(submission.participant_id);
+          if (!participant) {
+            return;
+          }
+          const notifyResult = await sendWechatCustomTextMessage({
+            openid: participant.wechat_openid,
+            content: buildUploadSuccessMessage({
+              fileName: decorated.file_name,
+              objectUrl: decorated.object_url,
+            }),
+          });
+          if (!notifyResult.ok) {
+            console.warn("wechat upload success notification failed", notifyResult.detail);
+          }
+        } catch (error) {
+          console.error("wechat upload success notification failed", error);
+        }
+      });
+
+      return jsonResponse({ message: "ok", submission: decorated }, 201);
     }
 
     if (insertResult.status === "duplicate") {
@@ -105,14 +141,11 @@ export async function POST(request: NextRequest) {
         status: "completed",
         completedAt: new Date().toISOString(),
       });
-      return jsonResponse(
-        {
-          message: "ok",
-          submission: existing ? decorateSubmissionObjectUrl(existing) : null,
-          deduplicated: true,
-        },
-        200,
-      );
+      return jsonResponse({
+        message: "ok",
+        submission: existing ? decorateSubmissionObjectUrl(existing) : null,
+        deduplicated: true,
+      });
     }
 
     await updateUploadSessionStatus({

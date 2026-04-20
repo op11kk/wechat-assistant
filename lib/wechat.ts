@@ -180,3 +180,44 @@ export async function downloadWechatMedia(mediaId: string): Promise<{
     contentType,
   };
 }
+
+export async function sendWechatCustomTextMessage(params: {
+  openid: string;
+  content: string;
+}): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const token = await getWechatAccessToken();
+  if (!token) {
+    return { ok: false, detail: "Missing access token" };
+  }
+
+  const response = await fetchWithTimeout(
+    `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${encodeURIComponent(token)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        touser: params.openid,
+        msgtype: "text",
+        text: {
+          content: params.content,
+        },
+      }),
+      cache: "no-store",
+    },
+    WECHAT_TOKEN_TIMEOUT_MS,
+    "wechat custom message",
+  );
+
+  const payload = (await response.json().catch(() => null)) as
+    | { errcode?: number; errmsg?: string }
+    | null;
+  if (!response.ok || (payload?.errcode ?? 0) !== 0) {
+    return {
+      ok: false,
+      detail: payload?.errmsg || `HTTP ${response.status}`,
+    };
+  }
+  return { ok: true };
+}

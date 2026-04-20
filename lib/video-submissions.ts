@@ -136,6 +136,14 @@ export async function findParticipantByCode(participantCode: string): Promise<Pa
   return row ? mapParticipantRow(row) : null;
 }
 
+export async function findParticipantById(participantId: number): Promise<ParticipantRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select * from public.participants where id = $1 limit 1`,
+    [participantId],
+  );
+  return row ? mapParticipantRow(row) : null;
+}
+
 export async function findParticipantByCodeAndOpenId(
   participantCode: string,
   openid: string,
@@ -308,6 +316,21 @@ export async function listVideoSubmissions(params: {
          limit $1`,
         [params.limit],
       );
+  return rows.map(mapVideoSubmissionRow);
+}
+
+export async function listVideoSubmissionsByParticipantId(
+  participantId: number,
+  limit: number,
+): Promise<VideoSubmissionRow[]> {
+  const rows = await dbQuery(
+    `select *
+     from public.video_submissions
+     where participant_id = $1
+     order by id desc
+     limit $2`,
+    [participantId, limit],
+  );
   return rows.map(mapVideoSubmissionRow);
 }
 

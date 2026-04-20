@@ -2,7 +2,11 @@ import { after, NextRequest } from "next/server";
 
 import { env } from "@/lib/env";
 import { jsonResponse, textResponse, xmlResponse } from "@/lib/http";
-import { createChatVideoWechatSubmission, syncWechatMediaToR2 } from "@/lib/video-submissions";
+import {
+  createChatVideoWechatSubmission,
+  findParticipantByOpenId,
+  syncWechatMediaToR2,
+} from "@/lib/video-submissions";
 import {
   buildWechatPassiveTextReply,
   parseWechatInboundXml,
@@ -20,6 +24,15 @@ function getWechatSignatureParams(request: NextRequest) {
     nonce: searchParams.get("nonce")?.trim() ?? "",
     echostr: searchParams.get("echostr")?.trim() ?? "",
   };
+}
+
+function getRequestOrigin(request: NextRequest): string {
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.trim();
+  const forwardedHost = request.headers.get("x-forwarded-host")?.trim();
+  if (forwardedProto && forwardedHost) {
+    return `${forwardedProto}://${forwardedHost}`;
+  }
+  return new URL(request.url).origin;
 }
 
 function logWechatRequest(
@@ -43,8 +56,15 @@ function logWechatRequest(
 }
 
 function isHelpTextKeyword(raw: string | null | undefined): boolean {
-  const s = raw?.trim().toLowerCase() ?? "";
-  return s === "openid" || s === "帮助" || s === "help" || s === "?" || s === "？";
+  const normalized = raw?.trim().toLowerCase() ?? "";
+  return (
+    normalized === "openid" ||
+    normalized === "帮助" ||
+    normalized === "help" ||
+    normalized === "上传码" ||
+    normalized === "code" ||
+    normalized === "?"
+  );
 }
 
 function isOpenIdHintEvent(msgType: string, event: string | null | undefined): boolean {
@@ -55,21 +75,27 @@ function isOpenIdHintEvent(msgType: string, event: string | null | undefined): b
   return normalized === "subscribe" || normalized === "scan";
 }
 
-function openIdRegistrationTip(userOpenid: string): string {
-  return `登记用 OpenID：\n${userOpenid}\n\n请将 OpenID、真实姓名、手机号交给管理员调用 POST /participants 录入；录入后再向本号发送视频或小视频即可收录。\n\n也可使用网站上的「大视频上传」页（H5 直传，需要对象存储配置）。`;
-}
+async function buildUploadCodeReplyContent(userOpenid: string, h5Url: string): Promise<string> {
+  const participant = await findParticipantByOpenId(userOpenid);
 
-async function ingestVideoAfterReply(params: {
-  openid: string;
-  mediaId: string;
-  userComment?: string | null;
-}) {
-  const result = await createChatVideoWechatSubmission(params);
-  console.info("[wechat] async video ingest result", result);
-  if (!result.ok) {
-    return;
+  if (participant) {
+    return [
+      `你的上传码：${participant.participant_code}`,
+      "",
+      `当前状态：${participant.status}`,
+      "打开下面的 H5 页面，输入这 6 位上传码即可上传视频：",
+      h5Url,
+      "",
+      "这个上传码比微信 openid 更短，专门给 H5 页面填写。",
+    ].join("\n");
   }
-  await syncWechatMediaToR2(result.submissionId, params.mediaId, result.participantCode);
+
+  return [
+    "你当前还没有上传码。",
+    "请先联系管理员登记，登记完成后再向公众号发送“上传码”获取 6 位上传码。",
+    "",
+    `管理员如需核对你的微信身份，可使用这个 openid：${userOpenid}`,
+  ].join("\n");
 }
 
 export async function GET(request: NextRequest) {
@@ -77,8 +103,10 @@ export async function GET(request: NextRequest) {
     console.error("[wechat] GET missing WECHAT_TOKEN");
     return jsonResponse({ error: "WECHAT_TOKEN not configured" }, 503);
   }
+
   const { signature, timestamp, nonce, echostr } = getWechatSignatureParams(request);
   logWechatRequest("get_received", request, { signature, timestamp, nonce, echostr });
+
   const missing: string[] = [];
   if (!signature) {
     missing.push("signature");
@@ -92,35 +120,25 @@ export async function GET(request: NextRequest) {
   if (!echostr.trim()) {
     missing.push("echostr");
   }
+
   if (missing.length > 0) {
-    console.warn("[wechat] GET missing query params (browser direct open is expected)", {
-      missing,
-      hint: "WeChat sends GET /api/wechat?signature&timestamp&nonce&echostr for URL verification.",
-    });
     return jsonResponse(
       {
         error: "Missing query params",
-        detail:
-          "微信公众号平台 URL 校验需要同时提供 signature、timestamp、nonce、echostr。浏览器直接打开本地址不会带这些参数，返回 400 属正常；请用后台“提交”或脚本模拟请求。",
+        detail: "微信公众号 URL 校验必须同时携带 signature、timestamp、nonce、echostr。",
         missing,
       },
       400,
     );
   }
-  const echostrTrimmed = echostr.trim();
-  console.info("[wechat] GET query preview", {
-    signaturePrefix: `${signature.slice(0, 8)}...`,
-    timestamp,
-    nonce,
-    echostrLength: echostrTrimmed.length,
-  });
+
   const signatureOk = verifyWechatSignature(signature, timestamp, nonce);
   if (!signatureOk) {
     console.warn("[wechat] GET signature mismatch", wechatSignatureDebug(signature, timestamp, nonce));
     return textResponse("Forbidden", 403);
   }
-  console.info("[wechat] GET signature verified, returning echostr");
-  return textResponse(echostrTrimmed);
+
+  return textResponse(echostr.trim());
 }
 
 export async function POST(request: NextRequest) {
@@ -128,65 +146,53 @@ export async function POST(request: NextRequest) {
     console.error("[wechat] POST missing WECHAT_TOKEN");
     return jsonResponse({ error: "WECHAT_TOKEN not configured" }, 503);
   }
+
   const params = getWechatSignatureParams(request);
   const { signature, timestamp, nonce } = params;
   logWechatRequest("post_received", request, params, {
     contentType: request.headers.get("content-type"),
     contentLength: request.headers.get("content-length"),
   });
+
   if (!signature || !timestamp || !nonce) {
-    console.warn("[wechat] POST missing required query params");
     return jsonResponse(
       {
         error: "Missing query params",
-        detail: "signature, timestamp, nonce are required for WeChat callbacks.",
+        detail: "微信公众号回调必须携带 signature、timestamp、nonce。",
       },
       400,
     );
   }
+
   const signatureOk = verifyWechatSignature(signature, timestamp, nonce);
   if (!signatureOk) {
     console.warn("[wechat] POST signature mismatch", wechatSignatureDebug(signature, timestamp, nonce));
     return textResponse("Forbidden", 403);
   }
+
   const xml = await request.text();
-  console.info("[wechat] POST body received", { bodyLength: xml.length });
   if (!xml.trim()) {
-    console.warn("[wechat] POST empty body");
     return textResponse("success");
   }
 
   const inbound = parseWechatInboundXml(xml);
   const userOpenid = inbound.openid;
   const officialId = inbound.toUserName;
-  console.info("[wechat] POST parsed inbound", {
-    msgType: inbound.msgType,
-    event: inbound.event,
-    eventKey: inbound.eventKey,
-    contentPreview: inbound.content?.slice(0, 32) ?? null,
-    hasOpenid: Boolean(userOpenid),
-    hasOfficialId: Boolean(officialId),
-    hasMediaId: Boolean(inbound.mediaId),
-  });
 
-  const wantsOpenidHint =
+  const wantsUploadCodeHint =
     userOpenid &&
     officialId &&
     (isOpenIdHintEvent(inbound.msgType, inbound.event) ||
       (inbound.msgType === "text" && isHelpTextKeyword(inbound.content)));
-  if (wantsOpenidHint && userOpenid && officialId) {
-    console.info("[wechat] POST replying with openid hint", {
-      reason:
-        inbound.msgType === "text"
-          ? "help_keyword"
-          : (inbound.event?.trim().toLowerCase() ?? "event"),
-      eventKey: inbound.eventKey,
-    });
+
+  if (wantsUploadCodeHint && userOpenid && officialId) {
+    const h5Url = new URL("/h5", getRequestOrigin(request)).toString();
+    const content = await buildUploadCodeReplyContent(userOpenid, h5Url);
     return xmlResponse(
       buildWechatPassiveTextReply({
         toUserOpenid: userOpenid,
         fromOfficialUserName: officialId,
-        content: openIdRegistrationTip(userOpenid),
+        content,
       }),
     );
   }
@@ -198,7 +204,6 @@ export async function POST(request: NextRequest) {
         mediaId: inbound.mediaId,
         userComment: inbound.description,
       });
-      console.info("[wechat] POST ingest result", result);
 
       if (result.ok) {
         after(async () => {
@@ -208,15 +213,17 @@ export async function POST(request: NextRequest) {
             console.error("[wechat] async media sync error", error);
           }
         });
+
         if (officialId) {
           return xmlResponse(
             buildWechatPassiveTextReply({
               toUserOpenid: userOpenid,
               fromOfficialUserName: officialId,
-              content: "已收到视频，正在归档。系统会自动拉取素材并同步到存储。",
+              content: "视频已收到，系统正在拉取素材并归档，请稍候查看。",
             }),
           );
         }
+
         return textResponse("success");
       }
 
@@ -227,10 +234,11 @@ export async function POST(request: NextRequest) {
       if (officialId) {
         const content =
           result.reason === "not_registered"
-            ? "您尚未登记，无法收录视频。请向本号发送“openid”或“帮助”查看登记说明。"
+            ? "你还没有上传码，请先联系管理员登记。登记完成后发送“上传码”即可获取 6 位上传码。"
             : result.reason === "participant_inactive"
-              ? "您的登记已暂停或退出，无法收录视频。请联系管理员处理。"
+              ? "你的登记状态当前不是 active，暂时无法收录视频，请联系管理员。"
               : "视频暂时无法保存，请稍后重试或联系管理员。";
+
         return xmlResponse(
           buildWechatPassiveTextReply({
             toUserOpenid: userOpenid,
@@ -253,6 +261,5 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  console.info("[wechat] POST default success response");
   return textResponse("success");
 }

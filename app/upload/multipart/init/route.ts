@@ -5,7 +5,7 @@ import { jsonResponse } from "@/lib/http";
 import { DEFAULT_MULTIPART_CONCURRENCY, getMultipartPartCount, getMultipartPartSize } from "@/lib/upload-multipart";
 import { createMultipartUpload, buildH5ObjectKey } from "@/lib/r2";
 import { createUploadSession } from "@/lib/upload-sessions";
-import { findParticipantByCodeAndOpenId } from "@/lib/video-submissions";
+import { findParticipantByCode } from "@/lib/video-submissions";
 
 export const runtime = "nodejs";
 
@@ -20,29 +20,28 @@ export async function POST(request: NextRequest) {
   }
 
   const participantCode = String(body.participant_code ?? "").trim();
-  const wechatOpenid = String(body.wechat_openid ?? "").trim();
   const contentType = String(body.content_type ?? "video/mp4").trim() || "video/mp4";
   const fileName = String(body.file_name ?? "").trim() || null;
   const sizeBytes = Number.parseInt(String(body.size_bytes ?? ""), 10);
   const userComment = String(body.user_comment ?? "").trim() || null;
 
-  if (!participantCode || !wechatOpenid || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+  if (!participantCode || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
     return jsonResponse(
       {
         error: "Missing fields",
-        detail: "participant_code, wechat_openid, size_bytes required",
+        detail: "participant_code and size_bytes required",
       },
       400,
     );
   }
 
   try {
-    const participant = await findParticipantByCodeAndOpenId(participantCode, wechatOpenid);
+    const participant = await findParticipantByCode(participantCode);
     if (!participant) {
       return jsonResponse(
         {
-          error: "Participant mismatch",
-          detail: "No row for this participant_code and wechat_openid. Please register first.",
+          error: "Participant not found",
+          detail: "上传码不存在，请回到公众号重新获取。",
         },
         404,
       );
@@ -63,15 +62,15 @@ export async function POST(request: NextRequest) {
       return jsonResponse({ error: "Invalid file size", detail: "size_bytes must be positive" }, 400);
     }
 
-    const objectKey = buildH5ObjectKey(participantCode, fileName, contentType);
+    const objectKey = buildH5ObjectKey(participant.participant_code, fileName, contentType);
     const multipart = await createMultipartUpload({
       objectKey,
       contentType,
     });
-    const session = await createUploadSession({
+    const uploadSession = await createUploadSession({
       participantId: participant.id,
-      participantCode,
-      wechatOpenid,
+      participantCode: participant.participant_code,
+      wechatOpenid: participant.wechat_openid,
       objectKey,
       fileName,
       sizeBytes,
@@ -83,12 +82,13 @@ export async function POST(request: NextRequest) {
     });
 
     return jsonResponse({
-      session_id: session.id,
-      object_key: session.object_key,
+      session_id: uploadSession.id,
+      participant_code: participant.participant_code,
+      object_key: uploadSession.object_key,
       object_url: multipart.object_url,
-      upload_id: session.upload_id,
-      part_size: session.part_size,
-      part_count: session.part_count,
+      upload_id: uploadSession.upload_id,
+      part_size: uploadSession.part_size,
+      part_count: uploadSession.part_count,
       concurrency: DEFAULT_MULTIPART_CONCURRENCY,
       storage: multipart.storage,
     });

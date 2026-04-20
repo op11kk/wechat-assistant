@@ -1,15 +1,29 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "iosbehind API",
-    "version": "2.4.0",
-    "description": "微信服务号视频数据收集 + 对象存储（Cloudflare R2 或腾讯云 COS）。环境变量见 .env.example。若设置 API_SECRET，除 GET /health、GET|POST /api/wechat、GET /h5 外须携带 Bearer 或 X-API-Key。\n\n建表：schema_video_collector.sql"
+    "title": "WeChat Assistant API",
+    "version": "3.0.0",
+    "description": "微信公众号视频上传服务。主流程为：公众号回复 6 位上传码，H5 页面填写上传码后分片上传到腾讯云 COS，业务数据写入 PostgreSQL。"
   },
-  "servers": [{ "url": "http://localhost:3000", "description": "本地开发" }],
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "本地开发"
+    }
+  ],
   "tags": [
-    { "name": "meta", "description": "健康检查与契约" },
-    { "name": "wechat", "description": "微信公众平台回调" },
-    { "name": "video_collector", "description": "登记、上传、审核" }
+    {
+      "name": "meta",
+      "description": "健康检查与契约"
+    },
+    {
+      "name": "wechat",
+      "description": "微信公众号回调"
+    },
+    {
+      "name": "video_collector",
+      "description": "参与者、H5 上传、审核"
+    }
   ],
   "components": {
     "securitySchemes": {
@@ -26,206 +40,286 @@
       }
     },
     "schemas": {
-      "HealthResponse": {
+      "ErrorResponse": {
         "type": "object",
-        "required": ["status", "db", "storage", "checks"],
+        "required": [
+          "error"
+        ],
         "properties": {
-          "status": { "type": "string", "enum": ["ok", "misconfigured"] },
-          "db": {
-            "type": "string",
-            "enum": ["supabase", "sqlite"],
-            "description": "本仓库实现为 supabase；sqlite 仅预留与其它部署对齐"
+          "error": {
+            "type": "string"
           },
-          "storage": {
-            "type": "string",
-            "description": "cloudflare_r2 | tencent_cos | unconfigured"
+          "detail": {
+            "type": "string"
           },
-          "supabase_ref": {
-            "type": "string",
-            "description": "由 SUPABASE_URL 解析出的项目 ref，用于核对是否连对库"
-          },
-          "checks": {
-            "type": "object",
-            "required": [
-              "supabase_configured",
-              "api_secret_set",
-              "wechat_token_set",
-              "wechat_app_credentials_set",
-              "public_object_base_url_set"
-            ],
-            "properties": {
-              "supabase_configured": { "type": "boolean" },
-              "api_secret_set": { "type": "boolean" },
-              "wechat_token_set": { "type": "boolean" },
-              "wechat_app_credentials_set": { "type": "boolean" },
-              "object_storage": {
-                "type": "string",
-                "nullable": true,
-                "description": "cloudflare_r2 或 tencent_cos；未配置对象存储时为 null"
-              },
-              "public_object_base_url_set": { "type": "boolean" }
-            }
+          "hint": {
+            "type": "string"
           }
         }
       },
-      "ErrorResponse": {
+      "HealthResponse": {
         "type": "object",
-        "required": ["error"],
         "properties": {
-          "error": { "type": "string" },
-          "detail": { "type": "string" },
-          "hint": { "type": "string" }
+          "status": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "object"
+          }
         }
       },
       "Participant": {
         "type": "object",
         "properties": {
-          "id": { "type": "integer", "format": "int64" },
-          "wechat_openid": { "type": "string" },
-          "real_name": { "type": "string" },
-          "phone": { "type": "string" },
-          "participant_code": { "type": "string" },
-          "status": { "type": "string", "enum": ["active", "paused", "withdrawn"] },
-          "extra": { "type": "object", "additionalProperties": true },
-          "created_at": { "type": "string" },
-          "updated_at": { "type": "string" }
-        }
-      },
-      "CreateParticipantBody": {
-        "type": "object",
-        "required": ["wechat_openid", "real_name", "phone"],
-        "properties": {
-          "wechat_openid": { "type": "string" },
-          "real_name": { "type": "string" },
-          "phone": { "type": "string" },
-          "status": { "type": "string" },
-          "extra": { "type": "object", "additionalProperties": true }
-        }
-      },
-      "CreateParticipantResponse": {
-        "type": "object",
-        "required": ["message", "participant"],
-        "properties": {
-          "message": { "type": "string" },
-          "participant": { "$ref": "#/components/schemas/Participant" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "wechat_openid": {
+            "type": "string"
+          },
+          "real_name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "participant_code": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused",
+              "withdrawn"
+            ]
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
         }
       },
       "ParticipantWrap": {
         "type": "object",
-        "required": ["participant"],
-        "properties": { "participant": { "$ref": "#/components/schemas/Participant" } }
+        "required": [
+          "participant"
+        ],
+        "properties": {
+          "participant": {
+            "$ref": "#/components/schemas/Participant"
+          }
+        }
+      },
+      "CreateParticipantBody": {
+        "type": "object",
+        "required": [
+          "wechat_openid",
+          "real_name",
+          "phone"
+        ],
+        "properties": {
+          "wechat_openid": {
+            "type": "string"
+          },
+          "real_name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
       },
       "VideoSubmission": {
         "type": "object",
         "properties": {
-          "id": { "type": "integer", "format": "int64" },
-          "participant_id": { "type": "integer", "format": "int64" },
-          "participant_code": { "type": "string" },
-          "source": { "type": "string", "enum": ["chat", "h5"] },
-          "wechat_media_id": { "type": "string", "nullable": true },
-          "object_key": { "type": "string" },
-          "file_name": { "type": "string", "nullable": true },
-          "size_bytes": { "type": "integer", "format": "int64", "nullable": true },
-          "mime": { "type": "string", "nullable": true },
-          "duration_sec": { "type": "number", "nullable": true },
-          "user_comment": { "type": "string", "nullable": true },
-          "review_status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
-          "reject_reason": { "type": "string", "nullable": true },
-          "reviewed_at": { "type": "string", "nullable": true },
-          "created_at": { "type": "string" },
-          "object_url": { "type": "string", "nullable": true, "description": "配置了公开域名时由接口拼装" }
-        }
-      },
-      "UploadCompleteBody": {
-        "type": "object",
-        "required": ["participant_code", "wechat_openid", "source", "object_key"],
-        "properties": {
-          "participant_code": { "type": "string" },
-          "wechat_openid": { "type": "string" },
-          "source": { "type": "string", "enum": ["chat", "h5"] },
-          "object_key": { "type": "string" },
-          "wechat_media_id": { "type": "string" },
-          "file_name": { "type": "string" },
-          "size_bytes": { "type": "integer", "format": "int64" },
-          "mime": { "type": "string" },
-          "duration_sec": { "type": "number" },
-          "user_comment": { "type": "string" }
-        }
-      },
-      "UploadCompleteResponse": {
-        "type": "object",
-        "required": ["message", "submission"],
-        "properties": {
-          "message": { "type": "string" },
-          "submission": { "$ref": "#/components/schemas/VideoSubmission" }
-        }
-      },
-      "UploadProxyResponse": {
-        "type": "object",
-        "required": ["message", "object_key", "submission", "via"],
-        "properties": {
-          "message": { "type": "string" },
-          "object_key": { "type": "string" },
-          "submission": { "$ref": "#/components/schemas/VideoSubmission" },
-          "via": { "type": "string", "example": "server_proxy" },
-          "hint": { "type": "string" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "participant_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "participant_code": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "h5"
+            ]
+          },
+          "wechat_media_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "object_key": {
+            "type": "string"
+          },
+          "file_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "mime": {
+            "type": "string",
+            "nullable": true
+          },
+          "duration_sec": {
+            "type": "number",
+            "nullable": true
+          },
+          "user_comment": {
+            "type": "string",
+            "nullable": true
+          },
+          "review_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ]
+          },
+          "reject_reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "reviewed_at": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "object_url": {
+            "type": "string",
+            "nullable": true
+          }
         }
       },
       "SubmissionsListResponse": {
         "type": "object",
-        "required": ["submissions"],
+        "required": [
+          "submissions"
+        ],
         "properties": {
           "submissions": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/VideoSubmission" }
+            "items": {
+              "$ref": "#/components/schemas/VideoSubmission"
+            }
           }
         }
       },
       "SubmissionSingleResponse": {
         "type": "object",
-        "required": ["submission"],
+        "required": [
+          "submission"
+        ],
         "properties": {
-          "submission": { "$ref": "#/components/schemas/VideoSubmission" }
+          "submission": {
+            "$ref": "#/components/schemas/VideoSubmission"
+          }
         }
       },
       "PatchSubmissionBody": {
         "type": "object",
         "properties": {
-          "review_status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
-          "reject_reason": { "type": "string", "nullable": true }
-        }
-      },
-      "PatchSubmissionResponse": {
-        "type": "object",
-        "required": ["message", "submission"],
-        "properties": {
-          "message": { "type": "string" },
-          "submission": { "$ref": "#/components/schemas/VideoSubmission" }
-        }
-      },
-      "PresignBody": {
-        "type": "object",
-        "required": ["participant_code", "wechat_openid"],
-        "properties": {
-          "participant_code": { "type": "string" },
-          "wechat_openid": { "type": "string" },
-          "content_type": { "type": "string", "default": "video/mp4" }
-        }
-      },
-      "PresignResponse": {
-        "type": "object",
-        "required": ["method", "url", "headers", "object_key", "expires_in", "storage"],
-        "properties": {
-          "method": { "type": "string", "example": "PUT" },
-          "url": { "type": "string" },
-          "headers": {
-            "type": "object",
-            "additionalProperties": { "type": "string" }
+          "review_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ]
           },
-          "object_key": { "type": "string" },
-          "expires_in": { "type": "integer" },
-          "storage": { "type": "string", "example": "cloudflare_r2" },
-          "object_url": { "type": "string", "nullable": true }
+          "reject_reason": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "H5LookupResponse": {
+        "type": "object",
+        "required": [
+          "participant",
+          "submissions"
+        ],
+        "properties": {
+          "participant": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "participant_code": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "display_phone": {
+                "type": "string"
+              }
+            }
+          },
+          "submissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoSubmission"
+            }
+          }
+        }
+      },
+      "MultipartInitBody": {
+        "type": "object",
+        "required": [
+          "participant_code",
+          "size_bytes"
+        ],
+        "properties": {
+          "participant_code": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string",
+            "default": "video/mp4"
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "user_comment": {
+            "type": "string"
+          }
         }
       }
     }
@@ -233,14 +327,20 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": ["meta"],
+        "tags": [
+          "meta"
+        ],
         "summary": "健康检查",
         "security": [],
         "responses": {
           "200": {
             "description": "OK",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
             }
           }
         }
@@ -248,251 +348,272 @@
     },
     "/openapi.json": {
       "get": {
-        "tags": ["meta"],
+        "tags": [
+          "meta"
+        ],
         "summary": "OpenAPI 契约",
         "responses": {
-          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object" } } } },
-          "404": {
-            "description": "缺失",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          "200": {
+            "description": "OK"
           }
         }
       }
     },
     "/api/wechat": {
       "get": {
-        "tags": ["wechat"],
-        "summary": "微信服务器验证",
-        "security": [],
-        "parameters": [
-          { "name": "signature", "in": "query", "schema": { "type": "string" } },
-          { "name": "timestamp", "in": "query", "schema": { "type": "string" } },
-          { "name": "nonce", "in": "query", "schema": { "type": "string" } },
-          { "name": "echostr", "in": "query", "schema": { "type": "string" } }
+        "tags": [
+          "wechat"
         ],
+        "summary": "微信公众号服务器校验",
+        "security": [],
         "responses": {
-          "200": { "description": "echostr 明文" },
-          "403": { "description": "签名校验失败" },
-          "503": { "description": "未配置 WECHAT_TOKEN" }
+          "200": {
+            "description": "返回 echostr"
+          }
         }
       },
       "post": {
-        "tags": ["wechat"],
-        "summary": "微信消息回调（明文 XML）",
+        "tags": [
+          "wechat"
+        ],
+        "summary": "微信公众号消息回调",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "success 或被动回复 XML"
+          }
+        }
+      }
+    },
+    "/api/h5/code/{participantCode}": {
+      "get": {
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "H5 按上传码查询用户和记录",
         "security": [],
         "parameters": [
-          { "name": "signature", "in": "query", "schema": { "type": "string" } },
-          { "name": "timestamp", "in": "query", "schema": { "type": "string" } },
-          { "name": "nonce", "in": "query", "schema": { "type": "string" } }
+          {
+            "name": "participantCode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
-            "description": "无回复或被动回复 XML（text 消息）；成功受理时也可能返回纯文本 success"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/H5LookupResponse"
+                }
+              }
+            }
           },
-          "403": { "description": "签名校验失败" },
-          "503": { "description": "未配置 WECHAT_TOKEN" }
+          "404": {
+            "description": "上传码不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
         }
       }
     },
     "/participants": {
       "post": {
-        "tags": ["video_collector"],
-        "summary": "登记用户并分配编号",
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "登记用户并分配上传码",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/CreateParticipantBody" } }
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateParticipantBody"
+              }
+            }
           }
         },
         "responses": {
           "201": {
-            "description": "Created",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/CreateParticipantResponse" } }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "409": {
-            "description": "已存在",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+            "description": "Created"
           }
         }
       }
     },
     "/participants/by_openid": {
       "get": {
-        "tags": ["video_collector"],
-        "summary": "按 openid 查询",
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "按 openid 查询参与者",
         "parameters": [
-          { "name": "wechat_openid", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "wechat_openid",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "OK",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ParticipantWrap" } } }
-          },
-          "404": {
-            "description": "未找到",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParticipantWrap"
+                }
+              }
+            }
           }
         }
       }
     },
     "/participants/code/{participant_code}": {
       "get": {
-        "tags": ["video_collector"],
-        "summary": "按编号查询",
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "按上传码查询参与者",
         "parameters": [
-          { "name": "participant_code", "in": "path", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "participant_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "OK",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ParticipantWrap" } } }
-          },
-          "404": {
-            "description": "未找到",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          }
-        }
-      }
-    },
-    "/upload/presign": {
-      "post": {
-        "tags": ["video_collector"],
-        "summary": "对象存储 PUT 预签名（H5 直传，R2 或 COS）",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/PresignBody" } }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/PresignResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParticipantWrap"
+                }
+              }
             }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "404": {
-            "description": "参与者不存在",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "403": {
-            "description": "参与者非 active",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "503": {
-            "description": "未配置对象存储（R2 或 COS）",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           }
         }
       }
     },
-    "/upload/proxy": {
+    "/upload/multipart/init": {
       "post": {
-        "tags": ["video_collector"],
-        "summary": "服务端中转上传（免浏览器 COS CORS）",
-        "description": "请求体为原始文件字节。必填头：X-Participant-Code、X-Wechat-Openid、Content-Type；X-File-Name 建议 URI 编码；可选 X-User-Comment（URI 编码）。体积受部署平台限制。",
-        "parameters": [
-          { "name": "X-Participant-Code", "in": "header", "required": true, "schema": { "type": "string" } },
-          { "name": "X-Wechat-Openid", "in": "header", "required": true, "schema": { "type": "string" } },
-          { "name": "X-File-Name", "in": "header", "schema": { "type": "string" } },
-          { "name": "X-User-Comment", "in": "header", "schema": { "type": "string" } }
+        "tags": [
+          "video_collector"
         ],
+        "summary": "创建分片上传会话",
+        "security": [],
         "requestBody": {
           "required": true,
           "content": {
-            "application/octet-stream": { "schema": { "type": "string", "format": "binary" } },
-            "video/mp4": { "schema": { "type": "string", "format": "binary" } }
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultipartInitBody"
+              }
+            }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/UploadProxyResponse" } }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "403": {
-            "description": "参与者非 active",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "404": {
-            "description": "参与者不匹配",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "502": {
-            "description": "对象存储写入失败",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "503": {
-            "description": "未配置对象存储",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+            "description": "OK"
           }
         }
       }
     },
-    "/upload/complete": {
+    "/upload/multipart/part": {
       "post": {
-        "tags": ["video_collector"],
-        "summary": "上传完成后写入记录",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/UploadCompleteBody" } }
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "获取单个分片上传签名",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK"
           }
-        },
+        }
+      },
+      "patch": {
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "登记单个分片 ETag",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/upload/multipart/complete": {
+      "post": {
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "完成分片上传并写入投稿记录",
+        "security": [],
         "responses": {
           "201": {
-            "description": "Created",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/UploadCompleteResponse" } }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "403": {
-            "description": "参与者非 active",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "404": {
-            "description": "参与者不匹配",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/upload/multipart/session/{sessionId}": {
+      "get": {
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "查询分片上传会话",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "video_collector"
+        ],
+        "summary": "放弃分片上传会话",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK"
           }
         }
       }
     },
     "/admin/submissions": {
       "get": {
-        "tags": ["video_collector"],
-        "summary": "审核列表",
-        "parameters": [
-          {
-            "name": "review_status",
-            "in": "query",
-            "schema": { "type": "string", "enum": ["pending", "approved", "rejected"] }
-          },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50, "maximum": 200 } }
+        "tags": [
+          "video_collector"
         ],
+        "summary": "审核列表",
         "responses": {
           "200": {
             "description": "OK",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/SubmissionsListResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionsListResponse"
+                }
+              }
             }
           }
         }
@@ -500,64 +621,52 @@
     },
     "/admin/submissions/{submission_id}": {
       "get": {
-        "tags": ["video_collector"],
-        "summary": "单条投稿详情",
-        "parameters": [
-          {
-            "name": "submission_id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "integer", "format": "int64" }
-          }
+        "tags": [
+          "video_collector"
         ],
+        "summary": "单条投稿详情",
         "responses": {
           "200": {
             "description": "OK",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/SubmissionSingleResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionSingleResponse"
+                }
+              }
             }
-          },
-          "400": {
-            "description": "非法 id",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "404": {
-            "description": "未找到",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           }
         }
       },
       "patch": {
-        "tags": ["video_collector"],
-        "summary": "更新审核状态",
-        "parameters": [
-          {
-            "name": "submission_id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "integer", "format": "int64" }
-          }
+        "tags": [
+          "video_collector"
         ],
+        "summary": "更新审核状态",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/PatchSubmissionBody" } }
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchSubmissionBody"
+              }
+            }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/PatchSubmissionResponse" } }
-            }
-          },
-          "404": {
-            "description": "未找到",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+            "description": "OK"
           }
         }
       }
     }
   },
-  "security": [{ "bearerAuth": [] }, { "ApiKeyAuth": [] }]
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "ApiKeyAuth": []
+    }
+  ]
 }
