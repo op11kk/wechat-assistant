@@ -1,4 +1,8 @@
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { randomUUID } from "node:crypto";
+
+import type { QueryResultRow } from "pg";
+
+import { dbQuery, dbQueryMaybeOne, dbQueryOne } from "@/lib/db";
 
 export type UploadedPart = {
   part_number: number;
@@ -29,6 +33,22 @@ export type UploadSessionRow = {
   completed_at: string | null;
 };
 
+function parseInteger(value: unknown): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Expected integer but received ${String(value)}`);
+  }
+  return parsed;
+}
+
+function parseNullableInteger(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeUploadedParts(value: unknown): UploadedPart[] {
   if (!Array.isArray(value)) {
     return [];
@@ -50,21 +70,20 @@ function normalizeUploadedParts(value: unknown): UploadedPart[] {
     .map(([part_number, etag]) => ({ part_number, etag }));
 }
 
-function mapUploadSessionRow(row: Record<string, unknown>): UploadSessionRow {
+function mapUploadSessionRow(row: QueryResultRow): UploadSessionRow {
   return {
     id: String(row.id),
-    participant_id: Number(row.participant_id),
+    participant_id: parseInteger(row.participant_id),
     participant_code: String(row.participant_code),
     wechat_openid: String(row.wechat_openid),
     source: "h5",
     object_key: String(row.object_key),
     file_name: row.file_name ? String(row.file_name) : null,
-    size_bytes:
-      row.size_bytes === null || row.size_bytes === undefined ? null : Number.parseInt(String(row.size_bytes), 10),
+    size_bytes: parseNullableInteger(row.size_bytes),
     mime: row.mime ? String(row.mime) : null,
     upload_id: String(row.upload_id),
-    part_size: Number.parseInt(String(row.part_size), 10),
-    part_count: Number.parseInt(String(row.part_count), 10),
+    part_size: parseInteger(row.part_size),
+    part_count: parseInteger(row.part_count),
     uploaded_parts: normalizeUploadedParts(row.uploaded_parts),
     status: String(row.status) as UploadSessionStatus,
     user_comment: row.user_comment ? String(row.user_comment) : null,
@@ -88,52 +107,66 @@ export async function createUploadSession(params: {
   partCount: number;
   userComment?: string | null;
 }): Promise<UploadSessionRow> {
-  const { data, error } = await getSupabaseAdmin()
-    .from("upload_sessions")
-    .insert({
-      participant_id: params.participantId,
-      participant_code: params.participantCode,
-      wechat_openid: params.wechatOpenid,
-      source: "h5",
-      object_key: params.objectKey,
-      file_name: params.fileName,
-      size_bytes: params.sizeBytes,
-      mime: params.mime,
-      upload_id: params.uploadId,
-      part_size: params.partSize,
-      part_count: params.partCount,
-      uploaded_parts: [],
-      status: "uploading",
-      user_comment: params.userComment ?? null,
-    })
-    .select("*")
-    .single();
-  if (error || !data) {
-    throw new Error(error?.message ?? "Failed to create upload session");
-  }
-  return mapUploadSessionRow(data as Record<string, unknown>);
+  const row = await dbQueryOne(
+    `insert into public.upload_sessions (
+       id,
+       participant_id,
+       participant_code,
+       wechat_openid,
+       source,
+       object_key,
+       file_name,
+       size_bytes,
+       mime,
+       upload_id,
+       part_size,
+       part_count,
+       uploaded_parts,
+       status,
+       user_comment
+     ) values ($1, $2, $3, $4, 'h5', $5, $6, $7, $8, $9, $10, $11, $12, 'uploading', $13)
+     returning *`,
+    [
+      randomUUID(),
+      params.participantId,
+      params.participantCode,
+      params.wechatOpenid,
+      params.objectKey,
+      params.fileName,
+      params.sizeBytes,
+      params.mime,
+      params.uploadId,
+      params.partSize,
+      params.partCount,
+      JSON.stringify([]),
+      params.userComment ?? null,
+    ],
+  );
+  return mapUploadSessionRow(row);
 }
 
 export async function getUploadSessionById(sessionId: string): Promise<UploadSessionRow | null> {
-  const { data, error } = await getSupabaseAdmin().from("upload_sessions").select("*").eq("id", sessionId).maybeSingle();
-  if (error) {
-    throw new Error(error.message);
-  }
-  return data ? mapUploadSessionRow(data as Record<string, unknown>) : null;
+  const row = await dbQueryMaybeOne(
+    `select * from public.upload_sessions where id = $1 limit 1`,
+    [sessionId],
+  );
+  return row ? mapUploadSessionRow(row) : null;
 }
 
-export async function updateUploadSessionUploadedParts(sessionId: string, uploadedParts: UploadedPart[]): Promise<UploadSessionRow> {
+export async function updateUploadSessionUploadedParts(
+  sessionId: string,
+  uploadedParts: UploadedPart[],
+): Promise<UploadSessionRow> {
   const normalized = normalizeUploadedParts(uploadedParts);
-  const { data, error } = await getSupabaseAdmin()
-    .from("upload_sessions")
-    .update({ uploaded_parts: normalized })
-    .eq("id", sessionId)
-    .select("*")
-    .single();
-  if (error || !data) {
-    throw new Error(error?.message ?? "Failed to update uploaded parts");
-  }
-  return mapUploadSessionRow(data as Record<string, unknown>);
+  const row = await dbQueryOne(
+    `update public.upload_sessions
+     set uploaded_parts = $1,
+         updated_at = now()
+     where id = $2
+     returning *`,
+    [JSON.stringify(normalized), sessionId],
+  );
+  return mapUploadSessionRow(row);
 }
 
 export async function updateUploadSessionStatus(params: {
@@ -142,21 +175,19 @@ export async function updateUploadSessionStatus(params: {
   errorMessage?: string | null;
   completedAt?: string | null;
 }): Promise<UploadSessionRow> {
-  const patch: Record<string, unknown> = {
-    status: params.status,
-    error_message: params.errorMessage ?? null,
-  };
-  if (params.completedAt !== undefined) {
-    patch.completed_at = params.completedAt;
-  }
-  const { data, error } = await getSupabaseAdmin()
-    .from("upload_sessions")
-    .update(patch)
-    .eq("id", params.sessionId)
-    .select("*")
-    .single();
-  if (error || !data) {
-    throw new Error(error?.message ?? "Failed to update upload session status");
-  }
-  return mapUploadSessionRow(data as Record<string, unknown>);
+  const row = await dbQueryOne(
+    `update public.upload_sessions
+     set status = $1,
+         error_message = $2,
+         completed_at = $3,
+         updated_at = now()
+     where id = $4
+     returning *`,
+    [params.status, params.errorMessage ?? null, params.completedAt ?? null, params.sessionId],
+  );
+  return mapUploadSessionRow(row);
+}
+
+export async function pingUploadSessionsTable(): Promise<void> {
+  await dbQuery("select 1 from public.upload_sessions limit 1");
 }

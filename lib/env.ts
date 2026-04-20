@@ -5,6 +5,7 @@ function readEnv(name: string): string {
 export type ObjectStorageProvider = "cloudflare_r2" | "tencent_cos";
 
 export const env = {
+  DATABASE_URL: readEnv("DATABASE_URL"),
   SUPABASE_URL: readEnv("SUPABASE_URL"),
   SUPABASE_KEY: readEnv("SUPABASE_KEY"),
   API_SECRET: readEnv("API_SECRET"),
@@ -30,11 +31,15 @@ export const env = {
   WECHAT_INGEST_API_TIMEOUT_MS: readEnv("WECHAT_INGEST_API_TIMEOUT_MS"),
 };
 
-export function assertSupabaseEnv(): void {
-  if (env.SUPABASE_URL && env.SUPABASE_KEY) {
+export function hasDatabaseConfig(): boolean {
+  return Boolean(env.DATABASE_URL);
+}
+
+export function assertDatabaseEnv(): void {
+  if (hasDatabaseConfig()) {
     return;
   }
-  throw new Error("Missing SUPABASE_URL or SUPABASE_KEY");
+  throw new Error("Missing DATABASE_URL");
 }
 
 export function hasR2Config(): boolean {
@@ -112,19 +117,6 @@ export function getCosEndpoint(): string {
     throw new Error("Missing COS_REGION");
   }
   return `https://cos.${env.COS_REGION}.myqcloud.com`;
-}
-
-export function getSupabaseProjectRef(): string | null {
-  try {
-    const host = new URL(env.SUPABASE_URL).hostname.toLowerCase();
-    const suffix = ".supabase.co";
-    if (!host.endsWith(suffix)) {
-      return null;
-    }
-    return host.slice(0, -suffix.length) || null;
-  } catch {
-    return null;
-  }
 }
 
 export function buildPublicObjectUrl(objectKey: string): string | null {

@@ -1,9 +1,8 @@
 import { NextRequest } from "next/server";
 
 import { requireApiAuth } from "@/lib/auth";
-import { jsonResponse, isDuplicateError } from "@/lib/http";
-import { getSupabaseAdmin } from "@/lib/supabase";
-import { nextParticipantCode, PARTICIPANT_STATUSES } from "@/lib/video-submissions";
+import { jsonResponse } from "@/lib/http";
+import { createParticipant, PARTICIPANT_STATUSES } from "@/lib/video-submissions";
 
 export const runtime = "nodejs";
 
@@ -38,51 +37,31 @@ export async function POST(request: NextRequest) {
     return jsonResponse({ error: "extra must be an object" }, 400);
   }
 
-  const existing = await getSupabaseAdmin()
-    .from("participants")
-    .select("*")
-    .eq("wechat_openid", wechatOpenid)
-    .maybeSingle();
-  if (existing.error) {
-    return jsonResponse({ error: "Query failed", detail: existing.error.message }, 500);
-  }
-  if (existing.data) {
+  const createResult = await createParticipant({
+    wechatOpenid,
+    realName,
+    phone,
+    status,
+    extra: extra && typeof extra === "object" ? (extra as Record<string, unknown>) : {},
+  });
+
+  if (createResult.status === "exists" && createResult.participant) {
     return jsonResponse(
       {
         error: "Participant already exists",
-        participant: existing.data,
+        participant: createResult.participant,
       },
       409,
     );
   }
-
-  for (let attempt = 0; attempt < 32; attempt += 1) {
-    const participantCode = await nextParticipantCode();
-    const insertResult = await getSupabaseAdmin()
-      .from("participants")
-      .insert({
-        wechat_openid: wechatOpenid,
-        real_name: realName,
-        phone,
-        participant_code: participantCode,
-        status,
-        extra: extra && typeof extra === "object" ? extra : {},
-      })
-      .select("*")
-      .single();
-    if (!insertResult.error && insertResult.data) {
-      return jsonResponse({ message: "ok", participant: insertResult.data }, 201);
-    }
-    if (!isDuplicateError(insertResult.error)) {
-      return jsonResponse(
-        {
-          error: "Failed to create participant",
-          detail: insertResult.error?.message ?? "unknown error",
-        },
-        500,
-      );
-    }
+  if (createResult.status === "created" && createResult.participant) {
+    return jsonResponse({ message: "ok", participant: createResult.participant }, 201);
   }
-
-  return jsonResponse({ error: "Could not allocate participant_code" }, 500);
+  return jsonResponse(
+    {
+      error: "Failed to create participant",
+      detail: createResult.detail ?? "unknown error",
+    },
+    500,
+  );
 }

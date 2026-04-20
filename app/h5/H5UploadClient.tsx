@@ -110,6 +110,7 @@ function formatBytes(sizeBytes: number | null | undefined): string {
   if (!sizeBytes || sizeBytes <= 0) {
     return "-";
   }
+
   const units = ["B", "KB", "MB", "GB"];
   let value = sizeBytes;
   let index = 0;
@@ -142,27 +143,32 @@ function uploadPartWithProgress(
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url, true);
     Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) {
         return;
       }
       onProgress(event.loaded);
     };
+
     xhr.onerror = () =>
-      reject(new Error("浏览器直传分片失败：请检查网络，且上传过程中不要切后台或锁屏。"));
+      reject(new Error("分片直传失败，请检查网络，并在上传期间保持页面停留在前台。"));
+
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         const etag = xhr.getResponseHeader("ETag")?.trim();
         if (!etag) {
-          reject(new Error("分片上传成功，但响应头缺少 ETag。"));
+          reject(new Error("分片上传成功，但响应头中缺少 ETag。"));
           return;
         }
         onProgress(blob.size);
         resolve(etag);
         return;
       }
-      reject(new Error(`分片上传失败: HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
+
+      reject(new Error(`分片上传失败：HTTP ${xhr.status} ${xhr.responseText.slice(0, 300)}`));
     };
+
     xhr.send(blob);
   });
 }
@@ -219,13 +225,15 @@ export default function H5UploadClient() {
       appendLog("error", "请填写 participant_code 和 wechat_openid。");
       return;
     }
+
     if (!file) {
       appendLog("error", "请先选择视频文件。");
       return;
     }
 
     setIsUploading(true);
-    const contentType = file.type || "video/mp4";
+    const selectedFile = file;
+    const contentType = selectedFile.type || "video/mp4";
     const participantCodeTrimmed = participantCode.trim();
     const wechatOpenidTrimmed = wechatOpenid.trim();
     const progressByPart = new Map<number, number>();
@@ -235,14 +243,14 @@ export default function H5UploadClient() {
       let sessionSnapshot: StoredMultipartSession;
 
       if (canResumeCurrentFile) {
-        appendLog("info", "检测到同一文件的未完成会话，正在恢复上传状态。");
+        appendLog("info", "检测到同一文件的未完成上传会话，正在恢复状态。");
         sessionState = await fetchJson<UploadSessionResponse>(`/upload/multipart/session/${storedSession.sessionId}`);
         sessionSnapshot = {
           sessionId: sessionState.session_id,
           participantCode: participantCodeTrimmed,
           wechatOpenid: wechatOpenidTrimmed,
-          fileName: file.name,
-          sizeBytes: file.size,
+          fileName: selectedFile.name,
+          sizeBytes: selectedFile.size,
           mime: contentType,
           objectKey: sessionState.object_key,
           partSize: sessionState.part_size,
@@ -261,18 +269,19 @@ export default function H5UploadClient() {
             participant_code: participantCodeTrimmed,
             wechat_openid: wechatOpenidTrimmed,
             content_type: contentType,
-            file_name: file.name,
-            size_bytes: file.size,
+            file_name: selectedFile.name,
+            size_bytes: selectedFile.size,
             user_comment: comment.trim() || undefined,
           }),
         });
+
         appendLog("info", init);
         sessionSnapshot = {
           sessionId: init.session_id,
           participantCode: participantCodeTrimmed,
           wechatOpenid: wechatOpenidTrimmed,
-          fileName: file.name,
-          sizeBytes: file.size,
+          fileName: selectedFile.name,
+          sizeBytes: selectedFile.size,
           mime: contentType,
           objectKey: init.object_key,
           partSize: init.part_size,
@@ -280,12 +289,13 @@ export default function H5UploadClient() {
           updatedAt: new Date().toISOString(),
         };
         syncStoredSession(sessionSnapshot);
+
         sessionState = {
           session_id: init.session_id,
           status: "uploading",
           object_key: init.object_key,
-          file_name: file.name,
-          size_bytes: file.size,
+          file_name: selectedFile.name,
+          size_bytes: selectedFile.size,
           mime: contentType,
           part_size: init.part_size,
           part_count: init.part_count,
@@ -308,7 +318,7 @@ export default function H5UploadClient() {
       const updateOverallProgress = () => {
         let uploadedBytes = 0;
         for (const partNumber of uploadedParts.keys()) {
-          uploadedBytes += getPartBytes(file.size, sessionState.part_size, partNumber);
+          uploadedBytes += getPartBytes(selectedFile.size, sessionState.part_size, partNumber);
         }
         for (const [partNumber, loadedBytes] of progressByPart.entries()) {
           if (uploadedParts.has(partNumber)) {
@@ -316,7 +326,7 @@ export default function H5UploadClient() {
           }
           uploadedBytes += loadedBytes;
         }
-        const nextProgress = Math.min(100, Math.round((uploadedBytes / file.size) * 100));
+        const nextProgress = Math.min(100, Math.round((uploadedBytes / selectedFile.size) * 100));
         setProgress(nextProgress);
       };
 
@@ -338,7 +348,7 @@ export default function H5UploadClient() {
       const queue = [...pendingPartNumbers];
 
       const uploadSinglePart = async (partNumber: number) => {
-        const blob = slicePart(file, sessionState.part_size, partNumber);
+        const blob = slicePart(selectedFile, sessionState.part_size, partNumber);
         let lastError: unknown = null;
 
         for (let attempt = 1; attempt <= MAX_RETRIES_PER_PART; attempt += 1) {
@@ -356,6 +366,7 @@ export default function H5UploadClient() {
 
             progressByPart.set(partNumber, 0);
             updateOverallProgress();
+
             const etag = await uploadPartWithProgress(
               presign.url,
               blob,
@@ -365,8 +376,10 @@ export default function H5UploadClient() {
                 updateOverallProgress();
               },
             );
+
             progressByPart.delete(partNumber);
             uploadedParts.set(partNumber, etag);
+
             await fetchJson("/upload/multipart/part", {
               method: "PATCH",
               headers: {
@@ -378,12 +391,14 @@ export default function H5UploadClient() {
                 etag,
               }),
             });
+
             sessionSnapshot = {
               ...sessionSnapshot,
               updatedAt: new Date().toISOString(),
             };
             syncStoredSession(sessionSnapshot);
             updateOverallProgress();
+
             if (uploadedParts.size === sessionState.part_count || uploadedParts.size % 5 === 0) {
               appendLog("info", `已完成 ${uploadedParts.size}/${sessionState.part_count} 个分片。`);
             }
@@ -392,8 +407,9 @@ export default function H5UploadClient() {
             lastError = error;
             progressByPart.delete(partNumber);
             updateOverallProgress();
+
             if (attempt < MAX_RETRIES_PER_PART) {
-              appendLog("error", `分片 ${partNumber} 上传失败，正在重试（${attempt}/${MAX_RETRIES_PER_PART}）`);
+              appendLog("error", `分片 ${partNumber} 上传失败，正在重试（${attempt}/${MAX_RETRIES_PER_PART}）。`);
               continue;
             }
           }
@@ -447,6 +463,7 @@ export default function H5UploadClient() {
     if (!storedSession) {
       return;
     }
+
     try {
       await fetchJson(`/upload/multipart/session/${storedSession.sessionId}`, {
         method: "DELETE",
@@ -467,7 +484,7 @@ export default function H5UploadClient() {
           <h1>大视频分片上传页</h1>
           <p>
             当前页面默认使用
-            <strong>腾讯云 COS 分片直传</strong>
+            <strong> 腾讯云 COS 分片直传 </strong>
             。上传过程中请保持页面在前台，不要锁屏或切换到其他页面。
           </p>
         </header>
@@ -521,11 +538,7 @@ export default function H5UploadClient() {
               accept="video/*"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
             />
-            {file ? (
-              <small>
-                已选择：{file.name}（{formatBytes(file.size)}）
-              </small>
-            ) : null}
+            {file ? <small>已选择：{file.name}（{formatBytes(file.size)}）</small> : null}
           </div>
 
           <div className="field field-full">

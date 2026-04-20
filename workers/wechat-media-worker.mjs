@@ -2,15 +2,16 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { createClient } from "@supabase/supabase-js";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const env = {
   PORT: readEnv("PORT") || "7001",
   WORKER_SECRET: readEnv("WORKER_SECRET"),
   WECHAT_APP_ID: readEnv("WECHAT_APP_ID"),
   WECHAT_APP_SECRET: readEnv("WECHAT_APP_SECRET"),
-  SUPABASE_URL: readEnv("SUPABASE_URL"),
-  SUPABASE_KEY: readEnv("SUPABASE_KEY"),
+  DATABASE_URL: readEnv("DATABASE_URL"),
   COS_SECRET_ID: readEnv("COS_SECRET_ID"),
   COS_SECRET_KEY: readEnv("COS_SECRET_KEY"),
   COS_REGION: readEnv("COS_REGION"),
@@ -28,6 +29,7 @@ let tokenCache = {
 };
 
 let storageClient = null;
+let dbPool = null;
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -78,12 +80,16 @@ async function withTimeout(label, timeoutMs, fn) {
   }
 }
 
-function getSupabase() {
-  return createClient(requireEnv("SUPABASE_URL"), requireEnv("SUPABASE_KEY"), {
-    auth: {
-      persistSession: false,
-    },
+function getDbPool() {
+  if (dbPool) {
+    return dbPool;
+  }
+  dbPool = new Pool({
+    connectionString: requireEnv("DATABASE_URL"),
+    max: 5,
+    idleTimeoutMillis: 30_000,
   });
+  return dbPool;
 }
 
 function getStorageClient() {
@@ -179,14 +185,6 @@ function buildObjectKey(participantCode, submissionId, contentType) {
   return `uploads/${participantCode}/chat/${submissionId}${extensionFor(contentType)}`;
 }
 
-function buildPublicObjectUrl(objectKey) {
-  if (!env.COS_PUBLIC_BASE_URL) {
-    return null;
-  }
-  const base = env.COS_PUBLIC_BASE_URL.endsWith("/") ? env.COS_PUBLIC_BASE_URL : `${env.COS_PUBLIC_BASE_URL}/`;
-  return new URL(objectKey, base).toString();
-}
-
 async function uploadToCos(objectKey, body, contentType) {
   requireEnv("COS_BUCKET");
   console.info("worker cos upload started", {
@@ -209,13 +207,22 @@ async function uploadToCos(objectKey, body, contentType) {
 }
 
 async function updateSubmission(submissionId, patch) {
-  const { error } = await getSupabase()
-    .from("video_submissions")
-    .update(patch)
-    .eq("id", submissionId);
-  if (error) {
-    throw new Error(`Supabase update failed: ${error.message}`);
+  const assignments = [];
+  const values = [];
+  let index = 1;
+  for (const [column, value] of Object.entries(patch)) {
+    assignments.push(`${column} = $${index}`);
+    values.push(value);
+    index += 1;
   }
+  if (assignments.length === 0) {
+    return;
+  }
+  values.push(submissionId);
+  await getDbPool().query(
+    `update public.video_submissions set ${assignments.join(", ")} where id = $${index}`,
+    values,
+  );
 }
 
 function assertAuthorized(req) {
@@ -279,10 +286,8 @@ async function processMediaSync({ requestId, submissionId, mediaId, participantC
   const download = await downloadWechatMedia(mediaId);
   const objectKey = buildObjectKey(participantCode, submissionId, download.contentType);
   await uploadToCos(objectKey, download.body, download.contentType);
-  const objectUrl = buildPublicObjectUrl(objectKey);
   await updateSubmission(submissionId, {
     object_key: objectKey,
-    object_url: objectUrl,
     size_bytes: download.body.length,
     mime: download.contentType,
   });

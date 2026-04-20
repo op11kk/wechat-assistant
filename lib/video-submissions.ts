@@ -1,24 +1,44 @@
-import { after } from "next/server";
+import type { QueryResultRow } from "pg";
 
-import {
-  buildPublicObjectUrl,
-  env,
-  getWechatIngestApiSecret,
-  getWechatIngestApiTimeoutMs,
-  getWechatMediaWorkerTimeoutMs,
-  hasWechatIngestApiConfig,
-  hasObjectStorageConfig,
-  hasWechatMediaConfig,
-  hasWechatMediaWorkerConfig,
-} from "@/lib/env";
+import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
+import { dbQuery, dbQueryMaybeOne, dbQueryOne } from "@/lib/db";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
-import { getSupabaseAdmin } from "@/lib/supabase";
 import { downloadWechatMedia } from "@/lib/wechat";
 
 export const REVIEW_STATUSES = new Set(["pending", "approved", "rejected"]);
 export const PARTICIPANT_STATUSES = new Set(["active", "paused", "withdrawn"]);
 export const SUBMISSION_SOURCES = new Set(["chat", "h5"]);
+
+export type ParticipantRow = {
+  id: number;
+  wechat_openid: string;
+  real_name: string;
+  phone: string;
+  participant_code: string;
+  status: string;
+  extra: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VideoSubmissionRow = {
+  id: number;
+  participant_id: number;
+  participant_code: string;
+  source: string;
+  wechat_media_id: string | null;
+  object_key: string;
+  file_name: string | null;
+  size_bytes: number | null;
+  mime: string | null;
+  duration_sec: number | null;
+  user_comment: string | null;
+  review_status: "pending" | "approved" | "rejected";
+  reject_reason: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+};
 
 type VideoSubmissionInsert = {
   participant_id: number;
@@ -34,53 +54,114 @@ type VideoSubmissionInsert = {
   review_status: "pending";
 };
 
-export async function findParticipantByOpenId(openid: string) {
-  const { data, error } = await getSupabaseAdmin()
-    .from("participants")
-    .select("*")
-    .eq("wechat_openid", openid)
-    .maybeSingle();
-  if (error) {
-    throw new Error(error.message);
+type CreateParticipantInput = {
+  wechatOpenid: string;
+  realName: string;
+  phone: string;
+  status: string;
+  extra: Record<string, unknown>;
+};
+
+function parseInteger(value: unknown): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Expected integer but received ${String(value)}`);
   }
-  return data;
+  return parsed;
 }
 
-export async function findParticipantByCode(participantCode: string) {
-  const { data, error } = await getSupabaseAdmin()
-    .from("participants")
-    .select("*")
-    .eq("participant_code", participantCode)
-    .maybeSingle();
-  if (error) {
-    throw new Error(error.message);
+function parseNullableInteger(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
-  return data;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
-export async function findParticipantByCodeAndOpenId(participantCode: string, openid: string) {
-  const { data, error } = await getSupabaseAdmin()
-    .from("participants")
-    .select("id, participant_code, status")
-    .eq("participant_code", participantCode)
-    .eq("wechat_openid", openid)
-    .maybeSingle();
-  if (error) {
-    throw new Error(error.message);
+function parseNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
-  return data;
+  const parsed = Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mapParticipantRow(row: QueryResultRow): ParticipantRow {
+  return {
+    id: parseInteger(row.id),
+    wechat_openid: String(row.wechat_openid),
+    real_name: String(row.real_name),
+    phone: String(row.phone),
+    participant_code: String(row.participant_code),
+    status: String(row.status),
+    extra: row.extra && typeof row.extra === "object" && !Array.isArray(row.extra) ? row.extra as Record<string, unknown> : {},
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function mapVideoSubmissionRow(row: QueryResultRow): VideoSubmissionRow {
+  return {
+    id: parseInteger(row.id),
+    participant_id: parseInteger(row.participant_id),
+    participant_code: String(row.participant_code),
+    source: String(row.source),
+    wechat_media_id: row.wechat_media_id ? String(row.wechat_media_id) : null,
+    object_key: String(row.object_key),
+    file_name: row.file_name ? String(row.file_name) : null,
+    size_bytes: parseNullableInteger(row.size_bytes),
+    mime: row.mime ? String(row.mime) : null,
+    duration_sec: parseNullableNumber(row.duration_sec),
+    user_comment: row.user_comment ? String(row.user_comment) : null,
+    review_status: String(row.review_status) as VideoSubmissionRow["review_status"],
+    reject_reason: row.reject_reason ? String(row.reject_reason) : null,
+    reviewed_at: row.reviewed_at ? String(row.reviewed_at) : null,
+    created_at: String(row.created_at),
+  };
+}
+
+export async function findParticipantByOpenId(openid: string): Promise<ParticipantRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select * from public.participants where wechat_openid = $1 limit 1`,
+    [openid],
+  );
+  return row ? mapParticipantRow(row) : null;
+}
+
+export async function findParticipantByCode(participantCode: string): Promise<ParticipantRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select * from public.participants where participant_code = $1 limit 1`,
+    [participantCode],
+  );
+  return row ? mapParticipantRow(row) : null;
+}
+
+export async function findParticipantByCodeAndOpenId(
+  participantCode: string,
+  openid: string,
+): Promise<Pick<ParticipantRow, "id" | "participant_code" | "status"> | null> {
+  const row = await dbQueryMaybeOne(
+    `select id, participant_code, status
+     from public.participants
+     where participant_code = $1 and wechat_openid = $2
+     limit 1`,
+    [participantCode, openid],
+  );
+  if (!row) {
+    return null;
+  }
+  return {
+    id: parseInteger(row.id),
+    participant_code: String(row.participant_code),
+    status: String(row.status),
+  };
 }
 
 export async function nextParticipantCode(): Promise<string> {
-  const { data, error } = await getSupabaseAdmin()
-    .from("participants")
-    .select("participant_code")
-    .order("id", { ascending: false })
-    .limit(1);
-  if (error) {
-    throw new Error(error.message);
-  }
-  const current = data?.[0]?.participant_code;
+  const row = await dbQueryMaybeOne<{ participant_code: string }>(
+    `select participant_code from public.participants order by id desc limit 1`,
+  );
+  const current = row?.participant_code;
   const next = Number.parseInt(String(current ?? "0"), 10) + 1;
   if (!Number.isFinite(next) || next > 999_999) {
     return "000001";
@@ -88,42 +169,201 @@ export async function nextParticipantCode(): Promise<string> {
   return String(next).padStart(6, "0");
 }
 
-export async function insertVideoSubmissionRow(row: VideoSubmissionInsert): Promise<{
-  status: "inserted" | "duplicate" | "error";
-  submission?: Record<string, unknown>;
+export async function createParticipant(params: CreateParticipantInput): Promise<{
+  status: "created" | "exists" | "error";
+  participant?: ParticipantRow;
   detail?: string;
 }> {
-  const { data, error } = await getSupabaseAdmin()
-    .from("video_submissions")
-    .insert(row)
-    .select("*")
-    .single();
-  if (!error && data) {
-    return { status: "inserted", submission: data };
+  const existing = await findParticipantByOpenId(params.wechatOpenid);
+  if (existing) {
+    return { status: "exists", participant: existing };
   }
-  if (isDuplicateError(error)) {
-    return { status: "duplicate" };
+
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const participantCode = await nextParticipantCode();
+    try {
+      const row = await dbQueryOne(
+        `insert into public.participants (
+           wechat_openid,
+           real_name,
+           phone,
+           participant_code,
+           status,
+           extra
+         ) values ($1, $2, $3, $4, $5, $6)
+         returning *`,
+        [
+          params.wechatOpenid,
+          params.realName,
+          params.phone,
+          participantCode,
+          params.status,
+          params.extra,
+        ],
+      );
+      return { status: "created", participant: mapParticipantRow(row) };
+    } catch (error) {
+      if (!isDuplicateError(error as { code?: string; message?: string })) {
+        return {
+          status: "error",
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
   }
+
   return {
     status: "error",
-    detail: error?.message ?? "Insert returned no row",
+    detail: "Could not allocate participant_code",
   };
+}
+
+export async function insertVideoSubmissionRow(row: VideoSubmissionInsert): Promise<{
+  status: "inserted" | "duplicate" | "error";
+  submission?: VideoSubmissionRow;
+  detail?: string;
+}> {
+  try {
+    const inserted = await dbQueryOne(
+      `insert into public.video_submissions (
+         participant_id,
+         participant_code,
+         source,
+         object_key,
+         wechat_media_id,
+         file_name,
+         size_bytes,
+         mime,
+         duration_sec,
+         user_comment,
+         review_status
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       returning *`,
+      [
+        row.participant_id,
+        row.participant_code,
+        row.source,
+        row.object_key,
+        row.wechat_media_id ?? null,
+        row.file_name ?? null,
+        row.size_bytes ?? null,
+        row.mime ?? null,
+        row.duration_sec ?? null,
+        row.user_comment ?? null,
+        row.review_status,
+      ],
+    );
+    return { status: "inserted", submission: mapVideoSubmissionRow(inserted) };
+  } catch (error) {
+    if (isDuplicateError(error as { code?: string; message?: string })) {
+      return { status: "duplicate" };
+    }
+    return {
+      status: "error",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function findExistingSubmissionForDedup(params: {
   participantId: number;
   objectKey: string;
   wechatMediaId?: string | null;
-}) {
-  const client = getSupabaseAdmin().from("video_submissions").select("*").limit(1);
-  const query = params.wechatMediaId
-    ? client.eq("wechat_media_id", params.wechatMediaId)
-    : client.eq("participant_id", params.participantId).eq("object_key", params.objectKey);
-  const { data, error } = await query.maybeSingle();
-  if (error) {
-    throw new Error(error.message);
+}): Promise<VideoSubmissionRow | null> {
+  const row = params.wechatMediaId
+    ? await dbQueryMaybeOne(
+        `select *
+         from public.video_submissions
+         where wechat_media_id = $1
+         limit 1`,
+        [params.wechatMediaId],
+      )
+    : await dbQueryMaybeOne(
+        `select *
+         from public.video_submissions
+         where participant_id = $1 and object_key = $2
+         limit 1`,
+        [params.participantId, params.objectKey],
+      );
+  return row ? mapVideoSubmissionRow(row) : null;
+}
+
+export async function listVideoSubmissions(params: {
+  reviewStatus?: string;
+  limit: number;
+}): Promise<VideoSubmissionRow[]> {
+  const rows = params.reviewStatus
+    ? await dbQuery(
+        `select *
+         from public.video_submissions
+         where review_status = $1
+         order by id desc
+         limit $2`,
+        [params.reviewStatus, params.limit],
+      )
+    : await dbQuery(
+        `select *
+         from public.video_submissions
+         order by id desc
+         limit $1`,
+        [params.limit],
+      );
+  return rows.map(mapVideoSubmissionRow);
+}
+
+export async function getVideoSubmissionById(id: number): Promise<VideoSubmissionRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select * from public.video_submissions where id = $1 limit 1`,
+    [id],
+  );
+  return row ? mapVideoSubmissionRow(row) : null;
+}
+
+export async function updateVideoSubmissionReview(params: {
+  id: number;
+  reviewStatus?: VideoSubmissionRow["review_status"];
+  rejectReason?: string | null;
+  reviewedAt?: string | null;
+}): Promise<VideoSubmissionRow | null> {
+  const patch: Array<[string, unknown]> = [];
+  if (params.reviewStatus !== undefined) {
+    patch.push(["review_status", params.reviewStatus]);
   }
-  return data;
+  if (params.rejectReason !== undefined) {
+    patch.push(["reject_reason", params.rejectReason]);
+  }
+  if (params.reviewedAt !== undefined) {
+    patch.push(["reviewed_at", params.reviewedAt]);
+  }
+  if (patch.length === 0) {
+    return getVideoSubmissionById(params.id);
+  }
+  const assignments = patch.map(([column], index) => `${column} = $${index + 1}`);
+  const values = patch.map(([, value]) => value);
+  const row = await dbQueryMaybeOne(
+    `update public.video_submissions
+     set ${assignments.join(", ")}
+     where id = $${patch.length + 1}
+     returning *`,
+    [...values, params.id],
+  );
+  return row ? mapVideoSubmissionRow(row) : null;
+}
+
+async function updateVideoSubmissionStorage(params: {
+  submissionId: number;
+  objectKey: string;
+  sizeBytes: number;
+  mime: string;
+}): Promise<void> {
+  await dbQuery(
+    `update public.video_submissions
+     set object_key = $1,
+         size_bytes = $2,
+         mime = $3
+     where id = $4`,
+    [params.objectKey, params.sizeBytes, params.mime, params.submissionId],
+  );
 }
 
 export async function syncWechatMediaToR2(
@@ -158,91 +398,18 @@ export async function syncWechatMediaToR2(
     contentType: download.contentType,
   });
   console.info("wechat media cos upload completed", { submissionId, objectKey });
-  const patch = {
-    object_key: objectKey,
-    size_bytes: download.body.length,
+  await updateVideoSubmissionStorage({
+    submissionId,
+    objectKey,
+    sizeBytes: download.body.length,
     mime: download.contentType,
-  };
-  const { error } = await getSupabaseAdmin()
-    .from("video_submissions")
-    .update(patch)
-    .eq("id", submissionId);
-  if (error) {
-    console.error("video_submissions update failed", error.message);
-    return;
-  }
+  });
   console.info("wechat media sync completed", {
     submissionId,
     objectKey,
     sizeBytes: download.body.length,
     contentType: download.contentType,
   });
-}
-
-export async function dispatchWechatMediaWorker(params: {
-  submissionId: number;
-  mediaId: string;
-  participantCode: string;
-}): Promise<void> {
-  const timeoutMs = getWechatMediaWorkerTimeoutMs();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    console.info("wechat media worker dispatch started", {
-      submissionId: params.submissionId,
-      participantCode: params.participantCode,
-      timeoutMs,
-    });
-    const response = await fetch(env.WECHAT_MEDIA_WORKER_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.WECHAT_MEDIA_WORKER_SECRET}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        submission_id: params.submissionId,
-        media_id: params.mediaId,
-        participant_code: params.participantCode,
-      }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      console.error("wechat media worker dispatch failed", {
-        submissionId: params.submissionId,
-        status: response.status,
-        body: text.slice(0, 500),
-      });
-      return;
-    }
-    console.info("wechat media worker dispatch completed", {
-      submissionId: params.submissionId,
-      status: response.status,
-      body: text.slice(0, 500),
-    });
-  } catch (error) {
-    console.error("wechat media worker dispatch error", {
-      submissionId: params.submissionId,
-      name: error instanceof Error ? error.name : null,
-      message: error instanceof Error ? error.message : String(error),
-      timeoutMs,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function syncChatMedia(params: {
-  submissionId: number;
-  mediaId: string;
-  participantCode: string;
-}): Promise<void> {
-  if (hasWechatMediaWorkerConfig()) {
-    await dispatchWechatMediaWorker(params);
-    return;
-  }
-  await syncWechatMediaToR2(params.submissionId, params.mediaId, params.participantCode);
 }
 
 export type ChatVideoIngestResult =
@@ -287,18 +454,14 @@ export async function createChatVideoWechatSubmission(params: {
       detail: insertResult.detail ?? "insert did not return row",
     };
   }
-  const submissionId = Number(insertResult.submission.id);
-  if (!Number.isFinite(submissionId)) {
-    return { ok: false, reason: "insert_failed", detail: "invalid submission id" };
-  }
   return {
     ok: true,
-    submissionId,
+    submissionId: insertResult.submission.id,
     participantCode: participant.participant_code,
   };
 }
 
-export async function ingestChatVideoWechat(params: {
+export async function processChatVideoWechat(params: {
   openid: string;
   mediaId: string;
   userComment?: string | null;
@@ -307,68 +470,8 @@ export async function ingestChatVideoWechat(params: {
   if (!result.ok) {
     return result;
   }
-  after(async () => {
-    try {
-      await syncChatMedia({
-        submissionId: result.submissionId,
-        mediaId: params.mediaId,
-        participantCode: result.participantCode,
-      });
-    } catch (error) {
-      console.error("wechat media sync failed", error);
-    }
-  });
+  await syncWechatMediaToR2(result.submissionId, params.mediaId, result.participantCode);
   return result;
-}
-
-export async function ingestChatVideoWechatViaApi(params: {
-  openid: string;
-  mediaId: string;
-  userComment?: string | null;
-}): Promise<ChatVideoIngestResult> {
-  if (!hasWechatIngestApiConfig()) {
-    return {
-      ok: false,
-      reason: "insert_failed",
-      detail: "WECHAT_INGEST_API_URL or secret not configured",
-    };
-  }
-  const timeoutMs = getWechatIngestApiTimeoutMs();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(env.WECHAT_INGEST_API_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${getWechatIngestApiSecret()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        openid: params.openid,
-        media_id: params.mediaId,
-        user_comment: params.userComment ?? null,
-      }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-    const payload = (await response.json().catch(() => null)) as ChatVideoIngestResult | { error?: string } | null;
-    if (!response.ok || !payload) {
-      return {
-        ok: false,
-        reason: "insert_failed",
-        detail: payload && "error" in payload ? payload.error : `remote ingest status ${response.status}`,
-      };
-    }
-    return payload as ChatVideoIngestResult;
-  } catch (error) {
-    return {
-      ok: false,
-      reason: "insert_failed",
-      detail: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 export function decorateSubmissionObjectUrl<T extends { object_key?: string | null }>(row: T): T & {

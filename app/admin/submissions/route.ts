@@ -2,8 +2,7 @@ import { NextRequest } from "next/server";
 
 import { requireApiAuth } from "@/lib/auth";
 import { jsonResponse } from "@/lib/http";
-import { decorateSubmissionObjectUrl, REVIEW_STATUSES } from "@/lib/video-submissions";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { decorateSubmissionObjectUrl, listVideoSubmissions, REVIEW_STATUSES } from "@/lib/video-submissions";
 
 export const runtime = "nodejs";
 
@@ -22,15 +21,18 @@ export async function GET(request: NextRequest) {
     return jsonResponse({ error: "invalid review_status" }, 400);
   }
   const safeLimit = Math.min(Math.max(limit, 1), 200);
-  let query = getSupabaseAdmin().from("video_submissions").select("*").order("id", { ascending: false }).limit(safeLimit);
-  if (reviewStatus) {
-    query = query.eq("review_status", reviewStatus);
+  try {
+    const data = await listVideoSubmissions({
+      reviewStatus: reviewStatus || undefined,
+      limit: safeLimit,
+    });
+    return jsonResponse({
+      submissions: data.map((row) => decorateSubmissionObjectUrl(row)),
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: "Query failed", detail: error instanceof Error ? error.message : String(error) },
+      500,
+    );
   }
-  const { data, error } = await query;
-  if (error) {
-    return jsonResponse({ error: "Query failed", detail: error.message }, 500);
-  }
-  return jsonResponse({
-    submissions: (data ?? []).map((row) => decorateSubmissionObjectUrl(row)),
-  });
 }

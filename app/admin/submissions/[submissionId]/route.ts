@@ -2,8 +2,12 @@ import { NextRequest } from "next/server";
 
 import { requireApiAuth } from "@/lib/auth";
 import { jsonResponse } from "@/lib/http";
-import { decorateSubmissionObjectUrl, REVIEW_STATUSES } from "@/lib/video-submissions";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  decorateSubmissionObjectUrl,
+  getVideoSubmissionById,
+  REVIEW_STATUSES,
+  updateVideoSubmissionReview,
+} from "@/lib/video-submissions";
 
 export const runtime = "nodejs";
 
@@ -20,14 +24,18 @@ export async function GET(
   if (!Number.isFinite(id)) {
     return jsonResponse({ error: "invalid submission id" }, 400);
   }
-  const { data, error } = await getSupabaseAdmin().from("video_submissions").select("*").eq("id", id).maybeSingle();
-  if (error) {
-    return jsonResponse({ error: "Query failed", detail: error.message }, 500);
+  try {
+    const data = await getVideoSubmissionById(id);
+    if (!data) {
+      return jsonResponse({ error: "submission not found", hint: id }, 404);
+    }
+    return jsonResponse({ submission: decorateSubmissionObjectUrl(data) });
+  } catch (error) {
+    return jsonResponse(
+      { error: "Query failed", detail: error instanceof Error ? error.message : String(error) },
+      500,
+    );
   }
-  if (!data) {
-    return jsonResponse({ error: "submission not found", hint: id }, 404);
-  }
-  return jsonResponse({ submission: decorateSubmissionObjectUrl(data) });
 }
 
 export async function PATCH(
@@ -48,15 +56,17 @@ export async function PATCH(
     return jsonResponse({ error: "Invalid or empty JSON body" }, 400);
   }
 
-  const patch: Record<string, unknown> = {};
+  let reviewStatus: "pending" | "approved" | "rejected" | undefined;
+  let rejectReason: string | null | undefined;
+  let reviewedAt: string | null | undefined;
   if ("review_status" in body) {
-    const reviewStatus = String(body.review_status ?? "").trim();
-    if (!REVIEW_STATUSES.has(reviewStatus)) {
+    const rawReviewStatus = String(body.review_status ?? "").trim();
+    if (!REVIEW_STATUSES.has(rawReviewStatus)) {
       return jsonResponse({ error: "invalid review_status" }, 400);
     }
-    patch.review_status = reviewStatus;
+    reviewStatus = rawReviewStatus as typeof reviewStatus;
     if (reviewStatus === "approved" || reviewStatus === "rejected") {
-      patch.reviewed_at = new Date().toISOString();
+      reviewedAt = new Date().toISOString();
     }
   }
   if ("reject_reason" in body) {
@@ -65,29 +75,33 @@ export async function PATCH(
       return jsonResponse({ error: "reject_reason must be string or null" }, 400);
     }
     if (rr === null || rr === undefined || `${rr}`.trim() === "") {
-      patch.reject_reason = null;
+      rejectReason = null;
     } else {
-      patch.reject_reason = String(rr).trim();
+      rejectReason = String(rr).trim();
     }
   }
-  if (Object.keys(patch).length === 0) {
+  if (reviewStatus === undefined && rejectReason === undefined && reviewedAt === undefined) {
     return jsonResponse({ error: "No patchable fields", detail: "review_status, reject_reason" }, 400);
   }
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("video_submissions")
-    .update(patch)
-    .eq("id", id)
-    .select("*")
-    .maybeSingle();
-  if (error) {
-    return jsonResponse({ error: "Update failed", detail: error.message }, 500);
+  try {
+    const data = await updateVideoSubmissionReview({
+      id,
+      reviewStatus,
+      rejectReason,
+      reviewedAt,
+    });
+    if (!data) {
+      return jsonResponse({ error: "submission not found", hint: id }, 404);
+    }
+    return jsonResponse({
+      message: "ok",
+      submission: decorateSubmissionObjectUrl(data),
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: "Update failed", detail: error instanceof Error ? error.message : String(error) },
+      500,
+    );
   }
-  if (!data) {
-    return jsonResponse({ error: "submission not found", hint: id }, 404);
-  }
-  return jsonResponse({
-    message: "ok",
-    submission: decorateSubmissionObjectUrl(data),
-  });
 }
