@@ -64,11 +64,23 @@ type VideoSubmissionInsert = {
 
 type CreateParticipantInput = {
   wechatOpenid: string;
-  realName: string;
-  phone: string;
+  realName?: string | null;
+  phone?: string | null;
   status: string;
-  extra: Record<string, unknown>;
+  extra?: Record<string, unknown>;
+  consentConfirmed?: boolean;
+  testStatus?: H5TestStatus;
+  formalStatus?: H5FormalStatus;
 };
+
+function getDefaultParticipantName(openid: string): string {
+  const suffix = openid.trim().slice(-6) || "user";
+  return `微信用户${suffix}`;
+}
+
+function getDefaultParticipantPhone(): string {
+  return "00000000000";
+}
 
 function parseInteger(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -196,6 +208,31 @@ export async function updateParticipantWorkflow(
   return row ? mapParticipantRow(row) : null;
 }
 
+export async function updateParticipantExtra(
+  participantId: number,
+  patch: Record<string, unknown>,
+): Promise<ParticipantRow | null> {
+  const participant = await findParticipantById(participantId);
+  if (!participant) {
+    return null;
+  }
+
+  const nextExtra = {
+    ...participant.extra,
+    ...patch,
+  };
+
+  const row = await dbQueryMaybeOne(
+    `update public.participants
+     set extra = $1,
+         updated_at = now()
+     where id = $2
+     returning *`,
+    [nextExtra, participantId],
+  );
+  return row ? mapParticipantRow(row) : null;
+}
+
 export async function findParticipantByCodeAndOpenId(
   participantCode: string,
   openid: string,
@@ -257,14 +294,14 @@ export async function createParticipant(params: CreateParticipantInput): Promise
          returning *`,
         [
           params.wechatOpenid,
-          params.realName,
-          params.phone,
+          params.realName?.trim() || getDefaultParticipantName(params.wechatOpenid),
+          params.phone?.trim() || getDefaultParticipantPhone(),
           participantCode,
           params.status,
-          true,
-          "not_started",
-          "not_started",
-          params.extra,
+          params.consentConfirmed ?? true,
+          params.testStatus ?? "not_started",
+          params.formalStatus ?? "not_started",
+          params.extra ?? {},
         ],
       );
       return { status: "created", participant: mapParticipantRow(row) };

@@ -213,16 +213,6 @@ function formatDate(value: string | null | undefined): string {
   )} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function getReviewLabel(status: SubmissionSummary["review_status"]): string {
-  if (status === "approved") {
-    return "审核通过";
-  }
-  if (status === "rejected") {
-    return "未通过";
-  }
-  return "待审核";
-}
-
 function getStageLabel(stage: WorkflowSummary["stage"]): string {
   if (stage === "formal_available") {
     return "正式任务";
@@ -337,7 +327,6 @@ export default function H5UploadClient() {
   const [viewer, setViewer] = useState<ParticipantLookupResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
-  const [comment, setComment] = useState("");
   const [scene, setScene] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
@@ -451,7 +440,7 @@ export default function H5UploadClient() {
     const structuredComment = encodeSubmissionMeta({
       kind: activeUploadKind,
       scene,
-      note: comment.trim() || null,
+      note: null,
     });
 
     try {
@@ -663,7 +652,6 @@ export default function H5UploadClient() {
       );
       clearStoredSession();
       setFile(null);
-      setComment("");
       await loadParticipantByCode(viewer.participant.participant_code);
     } catch (error) {
       appendLog("error", error instanceof Error ? error.message : String(error));
@@ -832,28 +820,6 @@ export default function H5UploadClient() {
                 />
                 {file ? <small>已选择：{file.name}（{formatBytes(file.size)}）</small> : null}
               </div>
-
-              <div className="field field-full">
-                <label htmlFor="comment">补充说明</label>
-                <textarea
-                  id="comment"
-                  value={comment}
-                  onChange={(event) => setComment(event.target.value)}
-                  placeholder="可选，例如拍摄时的特殊说明。"
-                />
-              </div>
-            </div>
-
-            <div className="scene-guide">
-              {viewer.scenes.map((item) => (
-                <article className="scene-card" key={item.name}>
-                  <div className="status-row">
-                    <strong>{item.name}</strong>
-                    <span className="status-chip">{item.remaining_text}</span>
-                  </div>
-                  <p>{item.description}</p>
-                </article>
-              ))}
             </div>
 
             <div className="progress-stack">
@@ -886,22 +852,11 @@ export default function H5UploadClient() {
           <div className="submission-list">
             {viewer.submissions.map((submission) => (
               <article className="submission-card" key={submission.id}>
-                <div className="status-row">
+                <p>
                   <strong>{submission.file_name || `视频 #${submission.id}`}</strong>
-                  <span className="status-chip">{submission.submission_kind_label}</span>
-                  <span className="status-chip">{getReviewLabel(submission.review_status)}</span>
-                </div>
-                <p className="field-hint">场景：{submission.scene || "未记录"}</p>
+                </p>
+                <p className="field-hint">待审核场景：{submission.scene || "未记录"}</p>
                 <p className="field-hint">提交时间：{formatDate(submission.created_at)}</p>
-                {submission.note ? <p className="field-hint">补充说明：{submission.note}</p> : null}
-                {submission.reject_reason ? <p className="field-hint">未通过原因：{submission.reject_reason}</p> : null}
-                {submission.object_url ? (
-                  <div className="submit-row">
-                    <a className="secondary-link" href={submission.object_url} rel="noreferrer" target="_blank">
-                      查看视频
-                    </a>
-                  </div>
-                ) : null}
               </article>
             ))}
           </div>

@@ -20,15 +20,15 @@ function buildReviewStatusMessage(params: {
   uploadKind: "test" | "formal" | null;
 }) {
   if (params.reviewStatus === "approved" && params.uploadKind === "test") {
-    return "你的测试视频已通过审核。现在可以回到同一个 H5 页面开始正式任务上传。";
+    return "你的测试视频已通过审核。现在可以回复“开始”进入正式任务页面。";
   }
   if (params.reviewStatus === "approved") {
     return "你提交的视频已通过审核，感谢参与。";
   }
   if (params.rejectReason) {
-    return `你提交的视频未通过审核。\n原因：${params.rejectReason}`;
+    return `你提交的视频未通过审核。\n原因：${params.rejectReason}\n请根据提示调整后重新提交。`;
   }
-  return "你提交的视频未通过审核，请回到 H5 页面查看最新状态。";
+  return "你提交的视频未通过审核，请回到 H5 页面查看最新状态并重新提交。";
 }
 
 async function syncParticipantWorkflowAfterReview(params: {
