@@ -1,11 +1,32 @@
 import { jsonResponse } from "@/lib/http";
 import {
+  deriveWorkflowState,
+  H5_SCENES,
+  parseSubmissionMeta,
+} from "@/lib/h5-workflow";
+import {
   decorateSubmissionObjectUrl,
   findParticipantByCode,
   listVideoSubmissionsByParticipantId,
 } from "@/lib/video-submissions";
 
 export const runtime = "nodejs";
+
+const DEMO_SCENE_REMAINING: Record<string, string> = {
+  厨房: "7/50",
+  客厅: "12/50",
+  卧室: "9/50",
+  卫生间: "5/50",
+  通用家务动作: "18/50",
+};
+
+const SCENE_DESCRIPTIONS: Record<string, string> = {
+  厨房: "餐具取出、清洗、擦拭、晾干、收纳等",
+  客厅: "擦桌、扫地、整理杂物、物品收纳等",
+  卧室: "整理凌乱物品、归位家具、收纳杂物等",
+  卫生间: "台面擦拭、物品归位、地面清洁等",
+  通用家务动作: "浇花、衣物整理、小件物品收纳等",
+};
 
 function maskName(name: string): string {
   const trimmed = name.trim();
@@ -24,6 +45,16 @@ function maskPhone(phone: string): string {
     return digits;
   }
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`;
+}
+
+function getSubmissionKindLabel(kind: string | null): string {
+  if (kind === "test") {
+    return "测试视频";
+  }
+  if (kind === "formal") {
+    return "正式任务";
+  }
+  return "历史上传";
 }
 
 type Params = {
@@ -52,7 +83,9 @@ export async function GET(_request: Request, context: Params) {
       );
     }
 
-    const submissions = await listVideoSubmissionsByParticipantId(participant.id, 10);
+    const submissions = await listVideoSubmissionsByParticipantId(participant.id, 20);
+    const workflow = deriveWorkflowState(participant, submissions);
+
     return jsonResponse({
       participant: {
         id: participant.id,
@@ -61,7 +94,22 @@ export async function GET(_request: Request, context: Params) {
         display_name: maskName(participant.real_name),
         display_phone: maskPhone(participant.phone),
       },
-      submissions: submissions.map((submission) => decorateSubmissionObjectUrl(submission)),
+      workflow,
+      scenes: H5_SCENES.map((scene) => ({
+        name: scene,
+        remaining_text: DEMO_SCENE_REMAINING[scene] ?? "7/50",
+        description: SCENE_DESCRIPTIONS[scene] ?? "",
+      })),
+      submissions: submissions.map((submission) => {
+        const meta = parseSubmissionMeta(submission.user_comment);
+        return {
+          ...decorateSubmissionObjectUrl(submission),
+          submission_kind: submission.submission_type ?? meta.kind,
+          submission_kind_label: getSubmissionKindLabel(submission.submission_type ?? meta.kind),
+          scene: submission.scene ?? meta.scene,
+          note: submission.user_comment ?? meta.note,
+        };
+      }),
     });
   } catch (error) {
     return jsonResponse(

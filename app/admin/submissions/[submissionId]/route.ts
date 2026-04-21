@@ -7,6 +7,7 @@ import {
   findParticipantById,
   getVideoSubmissionById,
   REVIEW_STATUSES,
+  updateParticipantWorkflow,
   updateVideoSubmissionReview,
 } from "@/lib/video-submissions";
 import { sendWechatCustomTextMessage } from "@/lib/wechat";
@@ -16,14 +17,39 @@ export const runtime = "nodejs";
 function buildReviewStatusMessage(params: {
   reviewStatus: "approved" | "rejected";
   rejectReason: string | null;
+  uploadKind: "test" | "formal" | null;
 }) {
+  if (params.reviewStatus === "approved" && params.uploadKind === "test") {
+    return "你的测试视频已通过审核。现在可以回到同一个 H5 页面开始正式任务上传。";
+  }
   if (params.reviewStatus === "approved") {
-    return "Your submitted video has been approved. Thank you.";
+    return "你提交的视频已通过审核，感谢参与。";
   }
   if (params.rejectReason) {
-    return `Your submitted video was rejected.\nReason: ${params.rejectReason}`;
+    return `你提交的视频未通过审核。\n原因：${params.rejectReason}`;
   }
-  return "Your submitted video was rejected. Please check the H5 page for the latest status.";
+  return "你提交的视频未通过审核，请回到 H5 页面查看最新状态。";
+}
+
+async function syncParticipantWorkflowAfterReview(params: {
+  participantId: number;
+  uploadKind: "test" | "formal" | null;
+  reviewStatus: "approved" | "rejected";
+}) {
+  if (params.uploadKind === "test") {
+    await updateParticipantWorkflow(params.participantId, {
+      consent_confirmed: true,
+      test_status: params.reviewStatus === "approved" ? "passed" : "failed",
+    });
+    return;
+  }
+
+  if (params.uploadKind === "formal") {
+    await updateParticipantWorkflow(params.participantId, {
+      consent_confirmed: true,
+      formal_status: "reviewed",
+    });
+  }
 }
 
 export async function GET(
@@ -115,7 +141,14 @@ export async function PATCH(
     }
 
     const finalReviewStatus = data.review_status;
+
     if (finalReviewStatus === "approved" || finalReviewStatus === "rejected") {
+      await syncParticipantWorkflowAfterReview({
+        participantId: data.participant_id,
+        uploadKind: data.submission_type,
+        reviewStatus: finalReviewStatus,
+      });
+
       after(async () => {
         try {
           const participant = await findParticipantById(data.participant_id);
@@ -127,6 +160,7 @@ export async function PATCH(
             content: buildReviewStatusMessage({
               reviewStatus: finalReviewStatus,
               rejectReason: data.reject_reason,
+              uploadKind: data.submission_type,
             }),
           });
           if (!notifyResult.ok) {

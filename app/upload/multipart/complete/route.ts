@@ -1,5 +1,6 @@
 import { after, NextRequest } from "next/server";
 
+import { parseSubmissionMeta } from "@/lib/h5-workflow";
 import { jsonResponse } from "@/lib/http";
 import { completeMultipartUpload } from "@/lib/r2";
 import { getUploadSessionById, updateUploadSessionStatus, updateUploadSessionUploadedParts } from "@/lib/upload-sessions";
@@ -8,6 +9,7 @@ import {
   findExistingSubmissionForDedup,
   findParticipantById,
   insertVideoSubmissionRow,
+  updateParticipantWorkflow,
 } from "@/lib/video-submissions";
 import { sendWechatCustomTextMessage } from "@/lib/wechat";
 
@@ -16,16 +18,41 @@ export const runtime = "nodejs";
 function buildUploadSuccessMessage(params: {
   fileName: string | null;
   objectUrl: string | null;
+  uploadKind: "test" | "formal" | null;
 }) {
-  const lines = ["Your video upload has been received. Current status: pending review."];
+  const lines =
+    params.uploadKind === "test"
+      ? ["你的测试视频已收到，当前状态为“待审核”。审核通过后，同一个 H5 页面会自动切换为正式任务。"]
+      : ["你的视频已收到，当前状态为“待审核”。"];
+
   if (params.fileName) {
-    lines.push(`File: ${params.fileName}`);
+    lines.push(`文件：${params.fileName}`);
   }
   if (params.objectUrl) {
-    lines.push(`Preview: ${params.objectUrl}`);
+    lines.push(`预览地址：${params.objectUrl}`);
   }
-  lines.push("You can return to the H5 page to view the latest review status.");
+  lines.push("你可以回到 H5 页面查看最新审核状态。");
   return lines.join("\n");
+}
+
+async function syncParticipantWorkflowAfterUpload(params: {
+  participantId: number;
+  uploadKind: "test" | "formal" | null;
+}) {
+  if (params.uploadKind === "test") {
+    await updateParticipantWorkflow(params.participantId, {
+      consent_confirmed: true,
+      test_status: "pending",
+    });
+    return;
+  }
+
+  if (params.uploadKind === "formal") {
+    await updateParticipantWorkflow(params.participantId, {
+      consent_confirmed: true,
+      formal_status: "pending",
+    });
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -85,6 +112,9 @@ export async function POST(request: NextRequest) {
       parts: finalParts,
     });
 
+    const finalComment = userComment ?? session.user_comment;
+    const submissionMeta = parseSubmissionMeta(finalComment);
+
     const insertResult = await insertVideoSubmissionRow({
       participant_id: session.participant_id,
       participant_code: session.participant_code,
@@ -93,7 +123,9 @@ export async function POST(request: NextRequest) {
       file_name: session.file_name,
       size_bytes: session.size_bytes,
       mime: session.mime,
-      user_comment: userComment ?? session.user_comment,
+      user_comment: submissionMeta.note,
+      submission_type: submissionMeta.kind,
+      scene: submissionMeta.scene,
       review_status: "pending",
     });
 
@@ -102,6 +134,11 @@ export async function POST(request: NextRequest) {
         sessionId,
         status: "completed",
         completedAt: new Date().toISOString(),
+      });
+
+      await syncParticipantWorkflowAfterUpload({
+        participantId: insertResult.submission.participant_id,
+        uploadKind: submissionMeta.kind,
       });
 
       const submission = insertResult.submission;
@@ -118,6 +155,7 @@ export async function POST(request: NextRequest) {
             content: buildUploadSuccessMessage({
               fileName: decorated.file_name,
               objectUrl: decorated.object_url,
+              uploadKind: submissionMeta.kind,
             }),
           });
           if (!notifyResult.ok) {

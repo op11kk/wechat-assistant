@@ -1,4 +1,6 @@
 .env
+.env.local
+.env.*.local
 .idea/
 node_modules/
 .next/
@@ -6,6 +8,7 @@ out/
 dist/
 coverage/
 *.log
+.next-dev-*.err
 *.tsbuildinfo
 venv/
 __pycache__/

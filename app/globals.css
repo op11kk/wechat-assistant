@@ -245,6 +245,7 @@ a {
 }
 
 .field input,
+.field select,
 .field textarea {
   width: 100%;
   padding: 14px 16px;
@@ -318,12 +319,111 @@ a {
   padding: 24px;
 }
 
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.feature-item {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.feature-item strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.95rem;
+}
+
+.feature-item p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
 .status-row {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   margin-bottom: 12px;
+}
+
+.callout-box {
+  margin-top: 14px;
+  padding: 18px 20px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 20px;
+  background: rgba(15, 118, 110, 0.08);
+}
+
+.callout-box strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.callout-box p {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.tips-list {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.tip-item {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 3px solid rgba(15, 118, 110, 0.7);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.56);
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.scene-selected {
+  margin-top: 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(15, 118, 110, 0.14);
+}
+
+.scene-selected strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.scene-selected p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.scene-guide {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.scene-card {
+  padding: 16px 18px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.scene-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
 }
 
 .status-log {
@@ -356,6 +456,16 @@ a {
   background: rgba(255, 255, 255, 0.58);
 }
 
+.log-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--brand-dark);
+}
+
+.log-details[open] summary {
+  margin-bottom: 14px;
+}
+
 @media (max-width: 760px) {
   .landing-shell,
   .upload-shell {
@@ -376,6 +486,14 @@ a {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scene-guide {
     grid-template-columns: 1fr;
   }
 }
