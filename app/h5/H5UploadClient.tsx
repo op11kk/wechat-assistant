@@ -111,6 +111,14 @@ type ParticipantLookupResponse = {
 
 const STORAGE_KEY = "h5-multipart-session-v2";
 const MAX_RETRIES_PER_PART = 3;
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+
+function buildApiUrl(path: string): string {
+  if (!API_BASE_URL || /^https?:\/\//i.test(path)) {
+    return path;
+  }
+  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 function formatLogValue(value: unknown): string {
   if (typeof value === "string") {
@@ -164,7 +172,7 @@ async function readJsonOrText(response: Response): Promise<unknown> {
 }
 
 async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
+  const response = await fetch(typeof input === "string" ? buildApiUrl(input) : input, init);
   if (!response.ok) {
     const detail = await readJsonOrText(response);
     throw new Error(formatLogValue(detail));

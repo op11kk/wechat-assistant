@@ -1,4 +1,4 @@
-import { jsonResponse } from "@/lib/http";
+import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import {
   deriveWorkflowState,
   H5_SCENES,
@@ -63,12 +63,17 @@ type Params = {
   }>;
 };
 
-export async function GET(_request: Request, context: Params) {
+export function OPTIONS(request: Request) {
+  return corsPreflightResponse(request.headers.get("origin"), "GET,OPTIONS");
+}
+
+export async function GET(request: Request, context: Params) {
+  const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "GET,OPTIONS");
   const { participantCode } = await context.params;
   const code = participantCode.trim();
 
   if (!code) {
-    return jsonResponse({ error: "invalid participant code" }, 400);
+    return jsonResponse({ error: "invalid participant code" }, 400, { headers: corsHeaders });
   }
 
   try {
@@ -80,37 +85,42 @@ export async function GET(_request: Request, context: Params) {
           detail: "上传码不存在，请回到公众号重新获取。",
         },
         404,
+        { headers: corsHeaders },
       );
     }
 
     const submissions = await listVideoSubmissionsByParticipantId(participant.id, 20);
     const workflow = deriveWorkflowState(participant, submissions);
 
-    return jsonResponse({
-      participant: {
-        id: participant.id,
-        participant_code: participant.participant_code,
-        status: participant.status,
-        display_name: maskName(participant.real_name),
-        display_phone: maskPhone(participant.phone),
+    return jsonResponse(
+      {
+        participant: {
+          id: participant.id,
+          participant_code: participant.participant_code,
+          status: participant.status,
+          display_name: maskName(participant.real_name),
+          display_phone: maskPhone(participant.phone),
+        },
+        workflow,
+        scenes: H5_SCENES.map((scene) => ({
+          name: scene,
+          remaining_text: DEMO_SCENE_REMAINING[scene] ?? "7/50",
+          description: SCENE_DESCRIPTIONS[scene] ?? "",
+        })),
+        submissions: submissions.map((submission) => {
+          const meta = parseSubmissionMeta(submission.user_comment);
+          return {
+            ...decorateSubmissionObjectUrl(submission),
+            submission_kind: submission.submission_type ?? meta.kind,
+            submission_kind_label: getSubmissionKindLabel(submission.submission_type ?? meta.kind),
+            scene: submission.scene ?? meta.scene,
+            note: submission.user_comment ?? meta.note,
+          };
+        }),
       },
-      workflow,
-      scenes: H5_SCENES.map((scene) => ({
-        name: scene,
-        remaining_text: DEMO_SCENE_REMAINING[scene] ?? "7/50",
-        description: SCENE_DESCRIPTIONS[scene] ?? "",
-      })),
-      submissions: submissions.map((submission) => {
-        const meta = parseSubmissionMeta(submission.user_comment);
-        return {
-          ...decorateSubmissionObjectUrl(submission),
-          submission_kind: submission.submission_type ?? meta.kind,
-          submission_kind_label: getSubmissionKindLabel(submission.submission_type ?? meta.kind),
-          scene: submission.scene ?? meta.scene,
-          note: submission.user_comment ?? meta.note,
-        };
-      }),
-    });
+      200,
+      { headers: corsHeaders },
+    );
   } catch (error) {
     return jsonResponse(
       {
@@ -118,6 +128,7 @@ export async function GET(_request: Request, context: Params) {
         detail: error instanceof Error ? error.message : String(error),
       },
       500,
+      { headers: corsHeaders },
     );
   }
 }

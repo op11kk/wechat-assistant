@@ -1,7 +1,7 @@
 import { after, NextRequest } from "next/server";
 
 import { parseSubmissionMeta } from "@/lib/h5-workflow";
-import { jsonResponse } from "@/lib/http";
+import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { completeMultipartUpload } from "@/lib/r2";
 import { getUploadSessionById, updateUploadSessionStatus, updateUploadSessionUploadedParts } from "@/lib/upload-sessions";
 import {
@@ -14,6 +14,10 @@ import {
 import { sendWechatCustomTextMessage } from "@/lib/wechat";
 
 export const runtime = "nodejs";
+
+export function OPTIONS(request: NextRequest) {
+  return corsPreflightResponse(request.headers.get("origin"), "POST,OPTIONS");
+}
 
 function buildUploadSuccessMessage(params: {
   fileName: string | null;
@@ -56,9 +60,10 @@ async function syncParticipantWorkflowAfterUpload(params: {
 }
 
 export async function POST(request: NextRequest) {
+  const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "POST,OPTIONS");
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {
-    return jsonResponse({ error: "Invalid JSON body" }, 400);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, { headers: corsHeaders });
   }
 
   const sessionId = String(body.session_id ?? "").trim();
@@ -73,13 +78,13 @@ export async function POST(request: NextRequest) {
     : [];
 
   if (!sessionId) {
-    return jsonResponse({ error: "Missing fields", detail: "session_id required" }, 400);
+    return jsonResponse({ error: "Missing fields", detail: "session_id required" }, 400, { headers: corsHeaders });
   }
 
   try {
     const session = await getUploadSessionById(sessionId);
     if (!session) {
-      return jsonResponse({ error: "Upload session not found" }, 404);
+      return jsonResponse({ error: "Upload session not found" }, 404, { headers: corsHeaders });
     }
     if (session.status === "completed") {
       const existing = await findExistingSubmissionForDedup({
@@ -87,11 +92,17 @@ export async function POST(request: NextRequest) {
         objectKey: session.object_key,
       });
       if (existing) {
-        return jsonResponse({ message: "ok", submission: decorateSubmissionObjectUrl(existing), deduplicated: true });
+        return jsonResponse(
+          { message: "ok", submission: decorateSubmissionObjectUrl(existing), deduplicated: true },
+          200,
+          { headers: corsHeaders },
+        );
       }
     }
     if (session.status !== "uploading") {
-      return jsonResponse({ error: "Upload session not active", detail: `status=${session.status}` }, 409);
+      return jsonResponse({ error: "Upload session not active", detail: `status=${session.status}` }, 409, {
+        headers: corsHeaders,
+      });
     }
 
     const finalParts = parts.length > 0 ? parts : session.uploaded_parts;
@@ -102,6 +113,7 @@ export async function POST(request: NextRequest) {
           detail: `expected ${session.part_count} parts, got ${finalParts.length}`,
         },
         400,
+        { headers: corsHeaders },
       );
     }
 
@@ -166,7 +178,7 @@ export async function POST(request: NextRequest) {
         }
       });
 
-      return jsonResponse({ message: "ok", submission: decorated }, 201);
+      return jsonResponse({ message: "ok", submission: decorated }, 201, { headers: corsHeaders });
     }
 
     if (insertResult.status === "duplicate") {
@@ -179,11 +191,15 @@ export async function POST(request: NextRequest) {
         status: "completed",
         completedAt: new Date().toISOString(),
       });
-      return jsonResponse({
-        message: "ok",
-        submission: existing ? decorateSubmissionObjectUrl(existing) : null,
-        deduplicated: true,
-      });
+      return jsonResponse(
+        {
+          message: "ok",
+          submission: existing ? decorateSubmissionObjectUrl(existing) : null,
+          deduplicated: true,
+        },
+        200,
+        { headers: corsHeaders },
+      );
     }
 
     await updateUploadSessionStatus({
@@ -197,8 +213,11 @@ export async function POST(request: NextRequest) {
         detail: insertResult.detail ?? "unknown error",
       },
       500,
+      { headers: corsHeaders },
     );
   } catch (error) {
-    return jsonResponse({ error: "multipart complete failed", detail: String(error) }, 500);
+    return jsonResponse({ error: "multipart complete failed", detail: String(error) }, 500, {
+      headers: corsHeaders,
+    });
   }
 }
