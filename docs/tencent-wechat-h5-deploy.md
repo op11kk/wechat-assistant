@@ -42,6 +42,7 @@ COS_SECRET_KEY=your-cos-secret-key
 COS_REGION=ap-guangzhou
 COS_BUCKET=your-bucket-appid
 COS_PUBLIC_BASE_URL=https://your-domain-or-cdn/
+WECHAT_H5_ENTRY_URL=https://app.capego.top/h5
 ```
 
 3. 初始化数据库

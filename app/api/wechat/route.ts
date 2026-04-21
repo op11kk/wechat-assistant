@@ -55,6 +55,22 @@ function logWechatRequest(
   });
 }
 
+function getWechatH5EntryUrl(request: NextRequest): string {
+  const configuredUrl = env.WECHAT_H5_ENTRY_URL;
+  if (configuredUrl) {
+    try {
+      return new URL(configuredUrl).toString();
+    } catch (error) {
+      console.warn("[wechat] invalid WECHAT_H5_ENTRY_URL, falling back to request origin", {
+        configuredUrl,
+        error,
+      });
+    }
+  }
+
+  return new URL("/h5", getRequestOrigin(request)).toString();
+}
+
 function isHelpTextKeyword(raw: string | null | undefined): boolean {
   const normalized = raw?.trim().toLowerCase() ?? "";
   return (
@@ -186,7 +202,7 @@ export async function POST(request: NextRequest) {
       (inbound.msgType === "text" && isHelpTextKeyword(inbound.content)));
 
   if (wantsUploadCodeHint && userOpenid && officialId) {
-    const h5Url = new URL("/h5", getRequestOrigin(request)).toString();
+    const h5Url = getWechatH5EntryUrl(request);
     const content = await buildUploadCodeReplyContent(userOpenid, h5Url);
     return xmlResponse(
       buildWechatPassiveTextReply({
