@@ -782,14 +782,6 @@ export default function H5UploadClient() {
               </div>
             </div>
 
-            <div className="tips-list">
-              {viewer.workflow.tips.map((tip) => (
-                <p className="tip-item" key={tip}>
-                  {tip}
-                </p>
-              ))}
-            </div>
-
             <div className="form-grid" style={{ marginTop: 20 }}>
               <div className="field">
                 <label htmlFor="scene">拍摄场景</label>
@@ -797,11 +789,12 @@ export default function H5UploadClient() {
                   <option value="">请选择场景</option>
                   {viewer.scenes.map((item) => (
                     <option key={item.name} value={item.name}>
-                      {item.name} {item.remaining_text ? `（${item.remaining_text}）` : ""}
+                      {item.name} {item.remaining_text ? `（此时剩余采集员名额：${item.remaining_text}）` : ""}
                     </option>
                   ))}
                 </select>
-                <p className="field-hint">当前展示的是演示名额，例如 7/50，后面可以再接真实数据库配额。</p>
+                <p className="field-hint">请先选择本次拍摄场景</p>
+                <p className="field-hint">当前数据采集员名额紧缺，请尽快提交审核，以提高通过率尽快获得收益</p>
                 {selectedSceneMeta ? (
                   <div className="scene-selected">
                     <strong>{selectedSceneMeta.name}</strong>
@@ -819,6 +812,10 @@ export default function H5UploadClient() {
                   onChange={(event) => setFile(event.target.files?.[0] ?? null)}
                 />
                 {file ? <small>已选择：{file.name}（{formatBytes(file.size)}）</small> : null}
+                <p className="field-hint">建议使用第一视角拍摄，画面尽量保持稳定。</p>
+                <p className="field-hint">
+                  <strong>上传时间可能较长，请保持网络稳定，不要关闭页面。</strong>
+                </p>
               </div>
             </div>
 
