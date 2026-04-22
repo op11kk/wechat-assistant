@@ -111,13 +111,8 @@ type ParticipantLookupResponse = {
 
 const STORAGE_KEY = "h5-multipart-session-v2";
 const MAX_RETRIES_PER_PART = 3;
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
-
 function buildApiUrl(path: string): string {
-  if (!API_BASE_URL || /^https?:\/\//i.test(path)) {
-    return path;
-  }
-  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+  return path;
 }
 
 function formatLogValue(value: unknown): string {
