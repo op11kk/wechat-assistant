@@ -1,4 +1,5 @@
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
+import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import {
   deriveWorkflowState,
   H5_SCENES,
@@ -64,10 +65,17 @@ type Params = {
 };
 
 export function OPTIONS(request: Request) {
+  if (hasBackendProxyOrigin()) {
+    return proxyToBackend(request, request.url ? new URL(request.url).pathname : "/api/h5/code");
+  }
   return corsPreflightResponse(request.headers.get("origin"), "GET,OPTIONS");
 }
 
 export async function GET(request: Request, context: Params) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "GET,OPTIONS");
   const { participantCode } = await context.params;
   const code = participantCode.trim();

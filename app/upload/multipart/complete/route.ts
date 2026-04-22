@@ -1,5 +1,6 @@
 import { after, NextRequest } from "next/server";
 
+import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import { parseSubmissionMeta } from "@/lib/h5-workflow";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { completeMultipartUpload } from "@/lib/r2";
@@ -16,6 +17,10 @@ import { sendWechatCustomTextMessage } from "@/lib/wechat";
 export const runtime = "nodejs";
 
 export function OPTIONS(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   return corsPreflightResponse(request.headers.get("origin"), "POST,OPTIONS");
 }
 
@@ -60,6 +65,10 @@ async function syncParticipantWorkflowAfterUpload(params: {
 }
 
 export async function POST(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "POST,OPTIONS");
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {

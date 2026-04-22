@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 
+import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { createPresignedUploadPartUrl } from "@/lib/r2";
 import { getUploadSessionById, updateUploadSessionUploadedParts } from "@/lib/upload-sessions";
@@ -7,10 +8,18 @@ import { getUploadSessionById, updateUploadSessionUploadedParts } from "@/lib/up
 export const runtime = "nodejs";
 
 export function OPTIONS(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   return corsPreflightResponse(request.headers.get("origin"), "POST,PATCH,OPTIONS");
 }
 
 export async function POST(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "POST,PATCH,OPTIONS");
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {
@@ -53,6 +62,10 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "POST,PATCH,OPTIONS");
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {

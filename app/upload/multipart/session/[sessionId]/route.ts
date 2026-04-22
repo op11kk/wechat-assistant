@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 
+import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { abortMultipartUpload } from "@/lib/r2";
 import { getUploadSessionById, updateUploadSessionStatus } from "@/lib/upload-sessions";
@@ -13,10 +14,18 @@ type Params = {
 };
 
 export function OPTIONS(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   return corsPreflightResponse(request.headers.get("origin"), "GET,DELETE,OPTIONS");
 }
 
 export async function GET(request: NextRequest, context: Params) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "GET,DELETE,OPTIONS");
   const { sessionId } = await context.params;
   if (!sessionId) {
@@ -54,6 +63,10 @@ export async function GET(request: NextRequest, context: Params) {
 }
 
 export async function DELETE(request: NextRequest, context: Params) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "GET,DELETE,OPTIONS");
   const { sessionId } = await context.params;
   if (!sessionId) {

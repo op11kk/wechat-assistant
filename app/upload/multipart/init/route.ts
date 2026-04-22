@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 
+import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import { hasObjectStorageConfig } from "@/lib/env";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { DEFAULT_MULTIPART_CONCURRENCY, getMultipartPartCount, getMultipartPartSize } from "@/lib/upload-multipart";
@@ -10,10 +11,18 @@ import { findParticipantByCode } from "@/lib/video-submissions";
 export const runtime = "nodejs";
 
 export function OPTIONS(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   return corsPreflightResponse(request.headers.get("origin"), "POST,OPTIONS");
 }
 
 export async function POST(request: NextRequest) {
+  if (hasBackendProxyOrigin()) {
+    const url = new URL(request.url);
+    return proxyToBackend(request, url.pathname, url.search);
+  }
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "POST,OPTIONS");
   if (!hasObjectStorageConfig()) {
     return jsonResponse({ error: "Object storage not configured" }, 503, { headers: corsHeaders });
