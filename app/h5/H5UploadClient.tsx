@@ -111,8 +111,39 @@ type ParticipantLookupResponse = {
 
 const STORAGE_KEY = "h5-multipart-session-v2";
 const MAX_RETRIES_PER_PART = 3;
+const DEFAULT_REMOTE_API_ORIGIN = "https://api.capego.top";
+const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+const LOOKUP_TIMEOUT_MS = 12_000;
+const MUTATION_TIMEOUT_MS = 20_000;
+const LOOKUP_RETRY_ATTEMPTS = 3;
+const MUTATION_RETRY_ATTEMPTS = 2;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function resolveApiBaseUrl(): string {
+  if (CONFIGURED_API_BASE_URL) {
+    return CONFIGURED_API_BASE_URL;
+  }
+
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "";
+    }
+  }
+
+  return DEFAULT_REMOTE_API_ORIGIN;
+}
+
 function buildApiUrl(path: string): string {
-  return path;
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const baseUrl = resolveApiBaseUrl();
+  return baseUrl ? `${baseUrl}${normalizedPath}` : normalizedPath;
 }
 
 function formatLogValue(value: unknown): string {
@@ -167,12 +198,50 @@ async function readJsonOrText(response: Response): Promise<unknown> {
 }
 
 async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(typeof input === "string" ? buildApiUrl(input) : input, init);
-  if (!response.ok) {
-    const detail = await readJsonOrText(response);
-    throw new Error(formatLogValue(detail));
+  const inputUrl = typeof input === "string" ? buildApiUrl(input) : input;
+  const attempts = init?.method && init.method !== "GET" && init.method !== "HEAD" ? MUTATION_RETRY_ATTEMPTS : LOOKUP_RETRY_ATTEMPTS;
+  const timeoutMs = init?.method && init.method !== "GET" && init.method !== "HEAD" ? MUTATION_TIMEOUT_MS : LOOKUP_TIMEOUT_MS;
+
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(inputUrl, {
+        ...init,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const detail = await readJsonOrText(response);
+        const message = formatLogValue(detail);
+        const shouldRetry = response.status >= 500 || response.status === 429;
+        if (attempt < attempts && shouldRetry) {
+          await sleep(300 * attempt);
+          continue;
+        }
+        throw new Error(message);
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      lastError = error;
+      const isAbort = error instanceof DOMException && error.name === "AbortError";
+      if (attempt < attempts) {
+        await sleep(300 * attempt);
+        continue;
+      }
+      if (isAbort) {
+        throw new Error("请求超时，请检查网络后重试。");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   }
-  return (await response.json()) as T;
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function formatBytes(sizeBytes: number | null | undefined): string {
