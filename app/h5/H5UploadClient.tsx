@@ -327,6 +327,8 @@ function uploadPartWithProgress(
   return new Promise<string>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url, true);
+    xhr.timeout = 90_000;
+
     Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
 
     xhr.upload.onprogress = (event) => {
@@ -338,6 +340,10 @@ function uploadPartWithProgress(
 
     xhr.onerror = () => {
       reject(new Error("上传过程中网络异常，请检查网络后重试。"));
+    };
+
+    xhr.ontimeout = () => {
+      reject(new Error("上传超时，正在重试。"));
     };
 
     xhr.onload = () => {
@@ -359,6 +365,7 @@ function uploadPartWithProgress(
     xhr.send(blob);
   });
 }
+
 
 function buildStatusSummary(params: {
   workflow: WorkflowSummary | null;
