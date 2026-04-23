@@ -845,6 +845,7 @@ export default function H5UploadClient() {
                 当前任务：{activeUploadKind === "test" ? "测试视频" : "正式任务视频"}
               </div>
             </div>
+            <p className="field-hint">请先选择本次拍摄场景</p>
 
             <div className="form-grid" style={{ marginTop: 20 }}>
               <div className="field">
@@ -857,8 +858,7 @@ export default function H5UploadClient() {
                     </option>
                   ))}
                 </select>
-                <p className="field-hint">请先选择本次拍摄场景</p>
-                <p className="field-hint">当前数据采集员名额紧缺，请尽快提交审核，以提高通过率尽快获得收益</p>
+                <p className="field-hint quota-warning">当前数据采集员名额紧缺，请尽快提交审核，以提高通过率尽快获得收益</p>
                 {selectedSceneMeta ? (
                   <div className="scene-selected">
                     <strong>{selectedSceneMeta.name}</strong>

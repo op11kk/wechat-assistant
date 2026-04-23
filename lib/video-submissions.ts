@@ -1,7 +1,7 @@
-import type { QueryResultRow } from "pg";
+import type { PoolClient, QueryResultRow } from "pg";
 
 import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
-import { dbQuery, dbQueryMaybeOne, dbQueryOne } from "@/lib/db";
+import { dbQuery, dbQueryMaybeOne, dbQueryOne, withDbTransaction } from "@/lib/db";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
 import { downloadWechatMedia } from "@/lib/wechat";
@@ -10,6 +10,10 @@ import type { H5FormalStatus, H5TestStatus, H5UploadKind } from "@/lib/h5-workfl
 export const REVIEW_STATUSES = new Set(["pending", "approved", "rejected"]);
 export const PARTICIPANT_STATUSES = new Set(["active", "paused", "withdrawn"]);
 export const SUBMISSION_SOURCES = new Set(["chat", "h5"]);
+
+const PARTICIPANT_CODE_MIN = 1;
+const PARTICIPANT_CODE_MAX = 999_999;
+const PARTICIPANT_CODE_ALLOCATION_LOCK_KEY = 2204223001;
 
 export type ParticipantRow = {
   id: number;
@@ -104,6 +108,21 @@ function parseNullableNumber(value: unknown): number | null {
   }
   const parsed = Number.parseFloat(String(value));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatParticipantCode(value: number): string {
+  return String(value).padStart(6, "0");
+}
+
+function normalizeParticipantCodeNumber(value: unknown): number | null {
+  const parsed = parseNullableInteger(value);
+  if (parsed === null) {
+    return null;
+  }
+  if (parsed < PARTICIPANT_CODE_MIN || parsed > PARTICIPANT_CODE_MAX) {
+    return null;
+  }
+  return parsed;
 }
 
 function mapParticipantRow(row: QueryResultRow): ParticipantRow {
@@ -255,15 +274,50 @@ export async function findParticipantByCodeAndOpenId(
 }
 
 export async function nextParticipantCode(): Promise<string> {
-  const row = await dbQueryMaybeOne<{ participant_code: string }>(
-    `select participant_code from public.participants order by id desc limit 1`,
+  const row = await dbQueryMaybeOne<{ max_code: number | string | null }>(
+    `select max(participant_code::int) as max_code
+     from public.participants
+     where participant_code ~ '^[0-9]{1,6}$'`,
   );
-  const current = row?.participant_code;
-  const next = Number.parseInt(String(current ?? "0"), 10) + 1;
-  if (!Number.isFinite(next) || next > 999_999) {
+  const current = normalizeParticipantCodeNumber(row?.max_code);
+  const next = (current ?? 0) + 1;
+  if (!Number.isFinite(next) || next > PARTICIPANT_CODE_MAX) {
     return "000001";
   }
-  return String(next).padStart(6, "0");
+  return formatParticipantCode(next);
+}
+
+async function findFirstAvailableParticipantCodeNumber(client: PoolClient): Promise<number | null> {
+  const result = await client.query<{ next_code: number | string | null }>(
+    `select series.code as next_code
+     from generate_series($1, $2) as series(code)
+     left join public.participants p
+       on p.participant_code = lpad(series.code::text, 6, '0')
+     where p.participant_code is null
+     order by series.code asc
+     limit 1`,
+    [PARTICIPANT_CODE_MIN, PARTICIPANT_CODE_MAX],
+  );
+  return normalizeParticipantCodeNumber(result.rows[0]?.next_code);
+}
+
+async function nextParticipantCodeNumberInTransaction(client: PoolClient): Promise<number | null> {
+  const result = await client.query<{ max_code: number | string | null }>(
+    `select max(participant_code::int) as max_code
+     from public.participants
+     where participant_code ~ '^[0-9]{1,6}$'`,
+  );
+  const currentMax = normalizeParticipantCodeNumber(result.rows[0]?.max_code);
+
+  if (currentMax === null) {
+    return PARTICIPANT_CODE_MIN;
+  }
+
+  if (currentMax < PARTICIPANT_CODE_MAX) {
+    return currentMax + 1;
+  }
+
+  return findFirstAvailableParticipantCodeNumber(client);
 }
 
 export async function createParticipant(params: CreateParticipantInput): Promise<{
@@ -271,54 +325,135 @@ export async function createParticipant(params: CreateParticipantInput): Promise
   participant?: ParticipantRow;
   detail?: string;
 }> {
+  console.info("[participants] createParticipant:start", {
+    openid: params.wechatOpenid,
+    status: params.status,
+    consentConfirmed: params.consentConfirmed ?? true,
+    testStatus: params.testStatus ?? "not_started",
+    formalStatus: params.formalStatus ?? "not_started",
+  });
+
   const existing = await findParticipantByOpenId(params.wechatOpenid);
   if (existing) {
+    console.info("[participants] createParticipant:exists", {
+      openid: params.wechatOpenid,
+      participantId: existing.id,
+      participantCode: existing.participant_code,
+    });
     return { status: "exists", participant: existing };
   }
 
-  for (let attempt = 0; attempt < 32; attempt += 1) {
-    const participantCode = await nextParticipantCode();
-    try {
-      const row = await dbQueryOne(
-        `insert into public.participants (
-           wechat_openid,
-           real_name,
-           phone,
-           participant_code,
-           status,
-           consent_confirmed,
-           test_status,
-           formal_status,
-           extra
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         returning *`,
-        [
-          params.wechatOpenid,
-          params.realName?.trim() || getDefaultParticipantName(params.wechatOpenid),
-          params.phone?.trim() || getDefaultParticipantPhone(),
-          participantCode,
-          params.status,
-          params.consentConfirmed ?? true,
-          params.testStatus ?? "not_started",
-          params.formalStatus ?? "not_started",
-          params.extra ?? {},
-        ],
+  try {
+    return await withDbTransaction(async (client) => {
+      // Serialize code allocation so concurrent signups never keep retrying the same value.
+      await client.query(`select pg_advisory_xact_lock($1)`, [PARTICIPANT_CODE_ALLOCATION_LOCK_KEY]);
+
+      const existingResult = await client.query(
+        `select * from public.participants where wechat_openid = $1 limit 1`,
+        [params.wechatOpenid],
       );
-      return { status: "created", participant: mapParticipantRow(row) };
-    } catch (error) {
-      if (!isDuplicateError(error as { code?: string; message?: string })) {
+      const existingRow = existingResult.rows[0];
+      if (existingRow) {
+        const participant = mapParticipantRow(existingRow);
+        console.info("[participants] createParticipant:exists_in_tx", {
+          openid: params.wechatOpenid,
+          participantId: participant.id,
+          participantCode: participant.participant_code,
+        });
+        return { status: "exists" as const, participant };
+      }
+
+      let nextCodeNumber = await nextParticipantCodeNumberInTransaction(client);
+      if (nextCodeNumber === null) {
         return {
-          status: "error",
-          detail: error instanceof Error ? error.message : String(error),
+          status: "error" as const,
+          detail: "Participant code space exhausted",
         };
       }
-    }
-  }
 
-  return {
-    status: "error",
-    detail: "Could not allocate participant_code",
-  };
+      for (let attempt = 0; attempt < 32; attempt += 1) {
+        const participantCode = formatParticipantCode(nextCodeNumber);
+        console.info("[participants] createParticipant:attempt", {
+          openid: params.wechatOpenid,
+          attempt: attempt + 1,
+          participantCode,
+        });
+
+        try {
+          const result = await client.query(
+            `insert into public.participants (
+               wechat_openid,
+               real_name,
+               phone,
+               participant_code,
+               status,
+               consent_confirmed,
+               test_status,
+               formal_status,
+               extra
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             returning *`,
+            [
+              params.wechatOpenid,
+              params.realName?.trim() || getDefaultParticipantName(params.wechatOpenid),
+              params.phone?.trim() || getDefaultParticipantPhone(),
+              participantCode,
+              params.status,
+              params.consentConfirmed ?? true,
+              params.testStatus ?? "not_started",
+              params.formalStatus ?? "not_started",
+              params.extra ?? {},
+            ],
+          );
+
+          console.info("[participants] createParticipant:created", {
+            openid: params.wechatOpenid,
+            participantCode,
+          });
+          return {
+            status: "created" as const,
+            participant: mapParticipantRow(result.rows[0]),
+          };
+        } catch (error) {
+          console.error("[participants] createParticipant:insert_error", {
+            openid: params.wechatOpenid,
+            attempt: attempt + 1,
+            participantCode,
+            detail: error instanceof Error ? error.message : String(error),
+          });
+
+          if (!isDuplicateError(error as { code?: string; message?: string })) {
+            return {
+              status: "error" as const,
+              detail: error instanceof Error ? error.message : String(error),
+            };
+          }
+
+          nextCodeNumber += 1;
+          if (nextCodeNumber > PARTICIPANT_CODE_MAX) {
+            const recycledCodeNumber = await findFirstAvailableParticipantCodeNumber(client);
+            if (recycledCodeNumber === null) {
+              return {
+                status: "error" as const,
+                detail: "Participant code space exhausted",
+              };
+            }
+            nextCodeNumber = recycledCodeNumber;
+          }
+        }
+      }
+
+      return {
+        status: "error" as const,
+        detail: "Could not allocate participant_code",
+      };
+    });
+  } catch (error) {
+    return {
+      status: "error",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function insertVideoSubmissionRow(row: VideoSubmissionInsert): Promise<{

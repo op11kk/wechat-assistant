@@ -26,7 +26,6 @@ export function OPTIONS(request: NextRequest) {
 
 function buildUploadSuccessMessage(params: {
   fileName: string | null;
-  objectUrl: string | null;
   uploadKind: "test" | "formal" | null;
 }) {
   const lines =
@@ -36,9 +35,6 @@ function buildUploadSuccessMessage(params: {
 
   if (params.fileName) {
     lines.push(`文件：${params.fileName}`);
-  }
-  if (params.objectUrl) {
-    lines.push(`预览地址：${params.objectUrl}`);
   }
   lines.push("你可以回到 H5 页面查看最新审核状态。");
   return lines.join("\n");
@@ -175,7 +171,6 @@ export async function POST(request: NextRequest) {
             openid: participant.wechat_openid,
             content: buildUploadSuccessMessage({
               fileName: decorated.file_name,
-              objectUrl: decorated.object_url,
               uploadKind: submissionMeta.kind,
             }),
           });

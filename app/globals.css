@@ -267,6 +267,11 @@ a {
   color: var(--muted);
 }
 
+.quota-warning {
+  color: #b42318;
+  font-weight: 800;
+}
+
 .submit-row {
   display: flex;
   align-items: center;
