@@ -169,6 +169,47 @@ export async function updateUploadSessionUploadedParts(
   return mapUploadSessionRow(row);
 }
 
+export async function mergeUploadSessionUploadedPart(
+  sessionId: string,
+  uploadedPart: UploadedPart,
+): Promise<UploadSessionRow> {
+  const normalized = normalizeUploadedParts([uploadedPart])[0];
+  if (!normalized) {
+    throw new Error("Invalid uploaded part");
+  }
+
+  const row = await dbQueryOne(
+    `update public.upload_sessions
+     set uploaded_parts = (
+           select coalesce(
+             jsonb_agg(jsonb_build_object('part_number', part_number, 'etag', etag) order by part_number),
+             '[]'::jsonb
+           )
+           from (
+             select distinct on (part_number) part_number, etag
+             from (
+               select
+                 (item ->> 'part_number')::integer as part_number,
+                 item ->> 'etag' as etag,
+                 0 as priority
+               from jsonb_array_elements(uploaded_parts) as item
+               where (item ->> 'part_number') ~ '^[0-9]+$'
+                 and coalesce(item ->> 'etag', '') <> ''
+               union all
+               select $2::integer as part_number, $3::text as etag, 1 as priority
+             ) merged_parts
+             where part_number > 0 and etag <> ''
+             order by part_number, priority desc
+           ) deduped_parts
+         ),
+         updated_at = now()
+     where id = $1
+     returning *`,
+    [sessionId, normalized.part_number, normalized.etag],
+  );
+  return mapUploadSessionRow(row);
+}
+
 export async function updateUploadSessionStatus(params: {
   sessionId: string;
   status: UploadSessionStatus;

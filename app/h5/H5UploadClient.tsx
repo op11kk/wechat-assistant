@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { encodeSubmissionMeta, type H5UploadKind } from "@/lib/h5-workflow";
@@ -116,10 +116,118 @@ const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().rep
 const LOOKUP_TIMEOUT_MS = 12_000;
 const MUTATION_TIMEOUT_MS = 20_000;
 const LOOKUP_RETRY_ATTEMPTS = 3;
-const MUTATION_RETRY_ATTEMPTS = 2;
+const MUTATION_RETRY_ATTEMPTS = 3;
+const MIN_PART_UPLOAD_TIMEOUT_MS = 120_000;
+const MOBILE_PART_UPLOAD_TIMEOUT_MS = 360_000;
+const VERY_SLOW_PART_UPLOAD_TIMEOUT_MS = 600_000;
+
+type NetworkInformationLike = {
+  downlink?: number;
+  effectiveType?: string;
+  saveData?: boolean;
+  type?: string;
+};
+
+class FetchJsonError extends Error {
+  readonly retriable: boolean;
+  readonly status: number;
+
+  constructor(message: string, status: number, retriable: boolean) {
+    super(message);
+    this.name = "FetchJsonError";
+    this.status = status;
+    this.retriable = retriable;
+  }
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getNetworkInformation(): NetworkInformationLike | null {
+  if (typeof window === "undefined" || typeof window.navigator === "undefined") {
+    return null;
+  }
+
+  const navigatorWithConnection = window.navigator as Navigator & {
+    connection?: NetworkInformationLike;
+    mozConnection?: NetworkInformationLike;
+    webkitConnection?: NetworkInformationLike;
+  };
+
+  return (
+    navigatorWithConnection.connection ??
+    navigatorWithConnection.mozConnection ??
+    navigatorWithConnection.webkitConnection ??
+    null
+  );
+}
+
+function isMobileUploadEnvironment(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const connection = getNetworkInformation();
+  const effectiveType = connection?.effectiveType?.toLowerCase() ?? "";
+  if (connection?.saveData || effectiveType === "slow-2g" || effectiveType === "2g" || effectiveType === "3g") {
+    return true;
+  }
+
+  return /android|iphone|ipad|ipod|mobile|micromessenger/i.test(window.navigator.userAgent);
+}
+
+function getUploadConcurrency(pendingPartCount: number): number {
+  const maxConcurrency = isMobileUploadEnvironment() ? 1 : DEFAULT_MULTIPART_CONCURRENCY;
+  return Math.min(maxConcurrency, Math.max(pendingPartCount, 1));
+}
+
+function getPartUploadTimeoutMs(blobSize: number): number {
+  const connection = getNetworkInformation();
+  const effectiveType = connection?.effectiveType?.toLowerCase() ?? "";
+
+  if (effectiveType === "slow-2g" || effectiveType === "2g") {
+    return VERY_SLOW_PART_UPLOAD_TIMEOUT_MS;
+  }
+
+  if (isMobileUploadEnvironment()) {
+    return MOBILE_PART_UPLOAD_TIMEOUT_MS;
+  }
+
+  const downlinkMbps = connection?.downlink;
+  if (downlinkMbps && Number.isFinite(downlinkMbps) && downlinkMbps > 0) {
+    const bytesPerMs = (downlinkMbps * 125_000) / 1000;
+    return Math.max(MIN_PART_UPLOAD_TIMEOUT_MS, Math.ceil((blobSize / bytesPerMs) * 4));
+  }
+
+  return MIN_PART_UPLOAD_TIMEOUT_MS;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  const baseDelay = isMobileUploadEnvironment() ? 900 : 450;
+  const jitter = Math.floor(Math.random() * 250);
+  return baseDelay * attempt * attempt + jitter;
+}
+
+function waitForOnline(timeoutMs = 15_000): Promise<void> {
+  if (typeof window === "undefined" || window.navigator.onLine) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const done = () => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("online", done);
+      resolve();
+    };
+    const timeoutId = window.setTimeout(done, timeoutMs);
+    window.addEventListener("online", done, { once: true });
+  });
+}
+
+async function waitBeforeRetry(attempt: number): Promise<void> {
+  await waitForOnline();
+  await sleep(getRetryDelayMs(attempt));
 }
 
 function resolveApiBaseUrl(): string {
@@ -219,17 +327,18 @@ async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promi
         const message = formatLogValue(detail);
         const shouldRetry = response.status >= 500 || response.status === 429;
         if (attempt < attempts && shouldRetry) {
-          await sleep(300 * attempt);
+          await waitBeforeRetry(attempt);
           continue;
         }
-        throw new Error(message);
+        throw new FetchJsonError(message, response.status, shouldRetry);
       }
       return (await response.json()) as T;
     } catch (error) {
       lastError = error;
       const isAbort = error instanceof DOMException && error.name === "AbortError";
-      if (attempt < attempts) {
-        await sleep(300 * attempt);
+      const isRetriable = !(error instanceof FetchJsonError) || error.retriable;
+      if (attempt < attempts && isRetriable) {
+        await waitBeforeRetry(attempt);
         continue;
       }
       if (isAbort) {
@@ -327,7 +436,7 @@ function uploadPartWithProgress(
   return new Promise<string>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url, true);
-    xhr.timeout = 90_000;
+    xhr.timeout = getPartUploadTimeoutMs(blob.size);
 
     Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
 
@@ -404,6 +513,7 @@ export default function H5UploadClient() {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [storedSession, setStoredSession] = useState<StoredMultipartSession | null>(null);
+  const uploadInFlightRef = useRef(false);
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
 
@@ -504,6 +614,10 @@ export default function H5UploadClient() {
       return;
     }
 
+    if (uploadInFlightRef.current) {
+      return;
+    }
+    uploadInFlightRef.current = true;
     setIsUploading(true);
     const selectedFile = file;
     const contentType = selectedFile.type || "video/mp4";
@@ -620,7 +734,7 @@ export default function H5UploadClient() {
 
       appendLog("info", `视频已切分为 ${sessionState.part_count} 段，正在开始上传。`);
 
-      const concurrency = Math.min(DEFAULT_MULTIPART_CONCURRENCY, Math.max(pendingPartNumbers.length, 1));
+      const concurrency = getUploadConcurrency(pendingPartNumbers.length);
       const queue = [...pendingPartNumbers];
 
       const uploadSinglePart = async (partNumber: number) => {
@@ -677,6 +791,7 @@ export default function H5UploadClient() {
 
             if (attempt < MAX_RETRIES_PER_PART) {
               appendLog("error", `上传中断，正在进行第 ${attempt + 1} 次重试。`);
+              await waitBeforeRetry(attempt);
             }
           }
         }
@@ -727,6 +842,7 @@ export default function H5UploadClient() {
     } catch (error) {
       appendLog("error", error instanceof Error ? error.message : String(error));
     } finally {
+      uploadInFlightRef.current = false;
       setIsUploading(false);
     }
   };

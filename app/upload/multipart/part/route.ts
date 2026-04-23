@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { createPresignedUploadPartUrl } from "@/lib/r2";
-import { getUploadSessionById, updateUploadSessionUploadedParts } from "@/lib/upload-sessions";
+import { getUploadSessionById, mergeUploadSessionUploadedPart } from "@/lib/upload-sessions";
 
 export const runtime = "nodejs";
 
@@ -88,12 +88,19 @@ export async function PATCH(request: NextRequest) {
     if (!session) {
       return jsonResponse({ error: "Upload session not found" }, 404, { headers: corsHeaders });
     }
-    const merged = new Map(session.uploaded_parts.map((part) => [part.part_number, part.etag]));
-    merged.set(partNumber, etag);
-    const updated = await updateUploadSessionUploadedParts(
-      sessionId,
-      Array.from(merged.entries()).map(([part_number, currentEtag]) => ({ part_number, etag: currentEtag })),
-    );
+    if (session.status !== "uploading") {
+      return jsonResponse({ error: "Upload session not active", detail: `status=${session.status}` }, 409, {
+        headers: corsHeaders,
+      });
+    }
+    if (partNumber > session.part_count) {
+      return jsonResponse({ error: "part_number out of range" }, 400, { headers: corsHeaders });
+    }
+
+    const updated = await mergeUploadSessionUploadedPart(sessionId, {
+      part_number: partNumber,
+      etag,
+    });
     return jsonResponse(
       {
         message: "ok",
