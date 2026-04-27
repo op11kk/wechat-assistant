@@ -11,8 +11,9 @@ import {
   updateParticipantWorkflow,
 } from "@/lib/video-submissions";
 import {
-  buildWechatPassiveTextReply,
+  buildWechatPassiveTextReply as buildRawWechatPassiveTextReply,
   parseWechatInboundXml,
+  sendWechatCustomTextMessage,
   verifyWechatSignature,
   wechatSignatureDebug,
 } from "@/lib/wechat";
@@ -26,6 +27,49 @@ type FlowStage =
   | "awaiting_test_start"
   | "test_ready"
   | "formal_ready";
+
+const MENU_GUIDE_KEY = "MENU_GUIDE";
+const MENU_CODE_KEY = "MENU_CODE";
+
+const ASYNC_PROCESSING_REPLY = [
+  "⏳ 正在处理中",
+  "已收到您的消息，正在为您生成内容，大约需要 3–5 秒，请稍等一下～",
+].join("\n");
+
+function decorateWechatReplyContent(content: string): string {
+  const normalized = content.trim();
+  if (!normalized) {
+    return content;
+  }
+
+  if (/^(?:\u2728|\u2705|\uD83D\uDCE8|\u26A0\uFE0F|【)\s*/.test(normalized)) {
+    return content;
+  }
+
+  return `\u2728 ${content}`;
+}
+
+function buildWechatPassiveTextReply(params: {
+  toUserOpenid: string;
+  fromOfficialUserName: string;
+  content: string;
+}) {
+  return buildRawWechatPassiveTextReply({
+    ...params,
+    content: decorateWechatReplyContent(params.content),
+  });
+}
+
+function buildUnknownCommandReply(): string {
+  return [
+    "【💬没看懂没关系】",
+    "你可以这样操作：",
+    "📌 新用户：回复【是】",
+    "📌 开始测试：回复【开始测试】",
+    "📌 开始赚钱：回复【开始】",
+    "或直接点击下方菜单【我该做什么】查看完整步骤。",
+  ].join("\n");
+}
 
 function getWechatSignatureParams(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -106,14 +150,36 @@ function isHelpTextKeyword(normalized: string): boolean {
   const lower = normalized.toLowerCase();
   return (
     lower === "help" ||
-    lower === "openid" ||
-    lower === "code" ||
     normalized === "帮助" ||
-    normalized === "上传码" ||
     normalized === "上传" ||
-    normalized === "代码" ||
     normalized === "?"
   );
+}
+
+function isGuideTextKeyword(normalized: string): boolean {
+  const lower = normalized.toLowerCase();
+  return (
+    lower === "guide" ||
+    normalized === "指引" ||
+    normalized === "流程" ||
+    normalized === "我该做什么" ||
+    normalized === "怎么做"
+  );
+}
+
+function isIdentityCodeKeyword(normalized: string): boolean {
+  const lower = normalized.toLowerCase();
+  return (
+    lower === "openid" ||
+    lower === "code" ||
+    normalized === "上传码" ||
+    normalized === "身份码" ||
+    normalized === "代码"
+  );
+}
+
+function isManualTextKeyword(normalized: string): boolean {
+  return normalized === "人工";
 }
 
 function isFirstTimeYesKeyword(normalized: string): boolean {
@@ -151,7 +217,92 @@ function buildWelcomeReply(): string {
     "请先确认你是否首次参与：",
     "回复“是”表示首次参与",
     "回复“否”表示老用户继续使用",
+    "",
+    "也可以直接使用底部菜单：",
+    "• 我该做什么",
+    "• 上传视频",
+    "• 我的身份码",
   ].join("\n");
+}
+
+function buildGuideReplyContent(): string {
+  return [
+    "【📌操作指引】",
+    "不知道该做什么？按下面步骤即可👇",
+    "① 如果你是第一次参与",
+    "👉 回复：【是】（系统会给你身份码）",
+    "② 获取身份码后",
+    "👉 回复：【我同意】（确认参与）",
+    "③ 开始测试视频",
+    "👉 回复：【开始测试】",
+    "④ 测试通过后",
+    "👉 回复：【开始】进入正式任务（可赚钱💰）",
+    "———",
+    "📤 上传视频：点击菜单【上传视频】",
+    "🆔 查看身份码：点击菜单【我的身份码】",
+    "💬 如果需要人工协助，请直接回复：人工",
+  ].join("\n");
+}
+
+function buildManualReplyContent(): string {
+  return [
+    "【👩‍💼人工协助】",
+    "请直接发送你遇到的问题，并附上你的身份码。",
+    "我们看到消息后会尽快人工跟进处理。",
+  ].join("\n");
+}
+
+async function sendWechatAsyncTextReply(params: {
+  openid: string;
+  buildContent: () => Promise<string>;
+  context: string;
+}) {
+  try {
+    const content = await params.buildContent();
+    const result = await sendWechatCustomTextMessage({
+      openid: params.openid,
+      content: decorateWechatReplyContent(content),
+    });
+
+    if (!result.ok) {
+      console.error("[wechat] async custom message failed", {
+        context: params.context,
+        openid: params.openid,
+        detail: result.detail,
+      });
+    }
+  } catch (error) {
+    console.error("[wechat] async reply build failed", {
+      context: params.context,
+      openid: params.openid,
+      error,
+    });
+
+    const fallbackResult = await sendWechatCustomTextMessage({
+      openid: params.openid,
+      content: "⚠️ 系统繁忙，请稍后回复“是”再试一次。",
+    });
+
+    if (!fallbackResult.ok) {
+      console.error("[wechat] async fallback message failed", {
+        context: params.context,
+        openid: params.openid,
+        detail: fallbackResult.detail,
+      });
+    }
+  }
+}
+
+function queueWechatAsyncReply(params: {
+  openid: string;
+  context: string;
+  buildContent: () => Promise<string>;
+}): string {
+  after(async () => {
+    await sendWechatAsyncTextReply(params);
+  });
+
+  return ASYNC_PROCESSING_REPLY;
 }
 
 async function setWechatFlowStage(participantId: number, stage: FlowStage, keyword?: string) {
@@ -216,7 +367,83 @@ async function buildUploadCodeReplyContent(userOpenid: string, request: NextRequ
   ].join("\n");
 }
 
-async function handleFirstTimeYes(userOpenid: string, request: NextRequest): Promise<string> {
+function getWorkflowStageLabelForChat(workflow: ReturnType<typeof parseParticipantWorkflowRow>): string {
+  if (!workflow.consent_confirmed) {
+    return "待确认参与";
+  }
+  if (workflow.test_status === "not_started") {
+    return "待提交测试视频";
+  }
+  if (workflow.test_status === "failed") {
+    return "测试未通过，待重新提交";
+  }
+  if (workflow.test_status === "pending") {
+    return "测试视频审核中";
+  }
+  if (workflow.formal_status === "pending") {
+    return "正式视频审核中";
+  }
+  return "已进入正式任务";
+}
+
+function getWorkflowNextStepText(workflow: ReturnType<typeof parseParticipantWorkflowRow>): string {
+  if (!workflow.consent_confirmed) {
+    return "下一步：请回复【我同意】确认参与。";
+  }
+  if (workflow.test_status === "not_started" || workflow.test_status === "failed") {
+    return "下一步：请回复【开始测试】进入测试视频上传。";
+  }
+  if (workflow.test_status === "pending") {
+    return "下一步：等待测试审核结果，审核通过后再回复【开始】。";
+  }
+  return "下一步：请回复【开始】进入正式任务。";
+}
+
+async function buildIdentityCodeReplyContent(userOpenid: string): Promise<string> {
+  const participant = await findParticipantByOpenId(userOpenid);
+
+  if (!participant) {
+    return [
+      "【🆔身份信息】",
+      "暂未查到你的身份码。",
+      "如果你是第一次参与，请先回复【是】完成登记。",
+    ].join("\n");
+  }
+
+  const workflow = parseParticipantWorkflowRow(participant);
+
+  return [
+    "【🆔身份信息】",
+    `您的身份验证码为：${participant.participant_code}`,
+    "请务必保存该编号，用于：",
+    "• 上传视频",
+    "• 查询审核状态",
+    "• 收益结算",
+    "",
+    `当前状态：${getWorkflowStageLabelForChat(workflow)}`,
+    getWorkflowNextStepText(workflow),
+  ].join("\n");
+}
+
+function normalizeMenuEventKey(eventKey: string | null | undefined): string {
+  return eventKey?.trim().toUpperCase() ?? "";
+}
+
+async function handleWechatMenuClick(eventKey: string | null | undefined, userOpenid: string): Promise<string | null> {
+  const normalized = normalizeMenuEventKey(eventKey);
+
+  if (normalized === MENU_GUIDE_KEY) {
+    return buildGuideReplyContent();
+  }
+
+  if (normalized === MENU_CODE_KEY) {
+    return buildIdentityCodeReplyContent(userOpenid);
+  }
+
+  return null;
+}
+
+async function handleFirstTimeYes(userOpenid: string): Promise<string> {
   console.info("[wechat] handleFirstTimeYes:start", {
     openid: userOpenid,
   });
@@ -348,9 +575,8 @@ async function handleConsent(userOpenid: string): Promise<string> {
     "已记录你的参与确认。",
     "",
     "测试视频说明：",
-    "1. 测试视频仅用于审核拍摄质量，不计收益。",
-    "2. 请按页面要求选择场景后上传。",
-    "3. 审核通过后才会进入正式任务。",
+    "1. 请按页面要求选择场景后上传。",
+    "2. 审核通过后才会进入正式任务。",
     "",
     "如果准备好了，请回复“开始测试”。",
   ].join("\n");
@@ -517,21 +743,63 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (inbound.msgType === "event") {
+    const eventName = inbound.event?.trim().toLowerCase() ?? "";
+    if (eventName === "click") {
+      const content = await handleWechatMenuClick(inbound.eventKey, userOpenid);
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
+    }
+  }
+
   if (inbound.msgType === "text") {
     let content: string | null = null;
 
     if (isFirstTimeYesKeyword(normalizedText)) {
-      content = await handleFirstTimeYes(userOpenid, request);
+      content = queueWechatAsyncReply({
+        openid: userOpenid,
+        context: "first_time_yes",
+        buildContent: () => handleFirstTimeYes(userOpenid),
+      });
     } else if (isFirstTimeNoKeyword(normalizedText)) {
-      content = await handleFirstTimeNo(userOpenid, request);
+      content = queueWechatAsyncReply({
+        openid: userOpenid,
+        context: "first_time_no",
+        buildContent: () => handleFirstTimeNo(userOpenid, request),
+      });
     } else if (isAgreeKeyword(normalizedText)) {
-      content = await handleConsent(userOpenid);
-    } else if (isStartTestKeyword(normalizedText)) {
-      content = await handleStartTest(userOpenid, request);
+      content = queueWechatAsyncReply({
+        openid: userOpenid,
+        context: "consent",
+        buildContent: () => handleConsent(userOpenid),
+      });
+    } else if (isStartTestKeyword(normalizedText) || normalizedText === "重新测试") {
+      content = queueWechatAsyncReply({
+        openid: userOpenid,
+        context: normalizedText === "重新测试" ? "restart_test" : "start_test",
+        buildContent: () => handleStartTest(userOpenid, request),
+      });
     } else if (isStartFormalKeyword(normalizedText)) {
-      content = await handleStartFormal(userOpenid, request);
-    } else if (isHelpTextKeyword(normalizedText)) {
-      content = await buildUploadCodeReplyContent(userOpenid, request);
+      content = queueWechatAsyncReply({
+        openid: userOpenid,
+        context: "start_formal",
+        buildContent: () => handleStartFormal(userOpenid, request),
+      });
+    } else if (isGuideTextKeyword(normalizedText) || isHelpTextKeyword(normalizedText)) {
+      content = buildGuideReplyContent();
+    } else if (isIdentityCodeKeyword(normalizedText)) {
+      content = await buildIdentityCodeReplyContent(userOpenid);
+    } else if (isManualTextKeyword(normalizedText)) {
+      content = buildManualReplyContent();
+    } else {
+      content = buildUnknownCommandReply();
     }
 
     if (content) {

@@ -8,7 +8,9 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "worker:wechat-media": "node workers/wechat-media-worker.mjs",
-    "wechat:simulate-get": "node scripts/wechat-simulate-url-verify.cjs"
+    "wechat:simulate-get": "node scripts/wechat-simulate-url-verify.cjs",
+    "wechat:publish-menu": "node scripts/wechat-publish-menu.cjs",
+    "wechat:publish-menu:dry-run": "node scripts/wechat-publish-menu.cjs --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.787.0",

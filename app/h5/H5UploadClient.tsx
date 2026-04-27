@@ -503,6 +503,7 @@ function buildStatusSummary(params: {
 
 export default function H5UploadClient() {
   const searchParams = useSearchParams();
+  const openedFromMenu = searchParams.get("from")?.trim() === "menu";
   const [participantCodeInput, setParticipantCodeInput] = useState("");
   const [viewer, setViewer] = useState<ParticipantLookupResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
@@ -534,7 +535,7 @@ export default function H5UploadClient() {
     const normalizedCode = code.trim();
     if (!normalizedCode) {
       setViewer(null);
-      setViewerError("请先输入 6 位上传码。");
+      setViewerError("请先输入 6 位身份码。");
       return;
     }
 
@@ -903,16 +904,20 @@ export default function H5UploadClient() {
         <div className="status-panel" style={{ marginBottom: 16 }}>
           <div className="form-grid" style={{ marginTop: 0 }}>
             <div className="field">
-              <label htmlFor="participantCode">上传码</label>
+              <label htmlFor="participantCode">身份码</label>
               <input
                 id="participantCode"
                 inputMode="numeric"
                 maxLength={6}
                 value={participantCodeInput}
                 onChange={(event) => setParticipantCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="请输入公众号里收到的 6 位上传码"
+                placeholder="请输入公众号里收到的 6 位身份码"
               />
-              <p className="field-hint">如果你是从公众号链接进入，系统通常会自动带入上传码。</p>
+              <p className="field-hint">
+                {openedFromMenu
+                  ? "如果没有自动带入身份码，请回到公众号点击【我的身份码】复制 6 位身份码后再回来输入。"
+                  : "如果你是从公众号链接进入，系统通常会自动带入身份码。"}
+              </p>
             </div>
           </div>
           <div className="submit-row">
@@ -931,8 +936,8 @@ export default function H5UploadClient() {
         {viewer?.participant ? (
           <div className="status-panel" style={{ marginBottom: 16 }}>
             <div className="status-row">
-              <div className="status-chip">账号 {viewer.participant.participant_code}</div>
-              <div className="status-chip">当前阶段 {getStageLabel(viewer.workflow.stage)}</div>
+              <div className="status-chip">身份码 {viewer.participant.participant_code}</div>
+              <div className="status-chip">当前状态 {getStageLabel(viewer.workflow.stage)}</div>
             </div>
             <p className="field-hint">
               当前用户：{viewer.participant.display_name} / {viewer.participant.display_phone}
@@ -1001,7 +1006,7 @@ export default function H5UploadClient() {
                 {file ? <small>已选择：{file.name}（{formatBytes(file.size)}）</small> : null}
                 <p className="field-hint">建议使用第一视角拍摄，画面尽量保持稳定。</p>
                 <p className="field-hint">
-                  <strong>上传时间可能较长，请保持网络稳定，不要关闭页面。</strong>
+                  <strong>视频上传需要时间，请耐心等待，上传完成前请勿关闭页面。</strong>
                 </p>
               </div>
             </div>
