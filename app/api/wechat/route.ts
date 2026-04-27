@@ -30,10 +30,17 @@ type FlowStage =
 
 const MENU_GUIDE_KEY = "MENU_GUIDE";
 const MENU_CODE_KEY = "MENU_CODE";
+const ACTION_DEDUP_WINDOW_MS = 3_000;
+const recentWechatActions = new Map<string, number>();
 
 const ASYNC_PROCESSING_REPLY = [
   "⏳ 正在处理中",
   "已收到您的消息，正在为您生成内容，大约需要 3–5 秒，请稍等一下～",
+].join("\n");
+
+const DUPLICATE_ACTION_REPLY = [
+  "⏳ 正在处理中",
+  "请勿重复点击或重复发送，系统会继续处理上一条请求。",
 ].join("\n");
 
 function decorateWechatReplyContent(content: string): string {
@@ -69,6 +76,32 @@ function buildUnknownCommandReply(): string {
     "📌 开始赚钱：回复【开始】",
     "或直接点击下方菜单【我该做什么】查看完整步骤。",
   ].join("\n");
+}
+
+function pruneRecentWechatActions(now: number) {
+  for (const [key, timestamp] of recentWechatActions.entries()) {
+    if (now - timestamp > ACTION_DEDUP_WINDOW_MS) {
+      recentWechatActions.delete(key);
+    }
+  }
+}
+
+function claimWechatAction(openid: string, action: string): boolean {
+  const now = Date.now();
+  pruneRecentWechatActions(now);
+
+  const key = `${openid}:${action}`;
+  const lastTriggeredAt = recentWechatActions.get(key);
+  if (lastTriggeredAt && now - lastTriggeredAt < ACTION_DEDUP_WINDOW_MS) {
+    return false;
+  }
+
+  recentWechatActions.set(key, now);
+  return true;
+}
+
+function tryClaimWechatActionReply(openid: string, action: string): string | null {
+  return claimWechatAction(openid, action) ? null : DUPLICATE_ACTION_REPLY;
 }
 
 function getWechatSignatureParams(request: NextRequest) {
@@ -433,10 +466,18 @@ async function handleWechatMenuClick(eventKey: string | null | undefined, userOp
   const normalized = normalizeMenuEventKey(eventKey);
 
   if (normalized === MENU_GUIDE_KEY) {
+    const duplicateReply = tryClaimWechatActionReply(userOpenid, "menu_guide");
+    if (duplicateReply) {
+      return duplicateReply;
+    }
     return buildGuideReplyContent();
   }
 
   if (normalized === MENU_CODE_KEY) {
+    const duplicateReply = tryClaimWechatActionReply(userOpenid, "menu_code");
+    if (duplicateReply) {
+      return duplicateReply;
+    }
     return buildIdentityCodeReplyContent(userOpenid);
   }
 
@@ -763,30 +804,80 @@ export async function POST(request: NextRequest) {
     let content: string | null = null;
 
     if (isFirstTimeYesKeyword(normalizedText)) {
+      content = tryClaimWechatActionReply(userOpenid, "first_time_yes");
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
       content = queueWechatAsyncReply({
         openid: userOpenid,
         context: "first_time_yes",
         buildContent: () => handleFirstTimeYes(userOpenid),
       });
     } else if (isFirstTimeNoKeyword(normalizedText)) {
+      content = tryClaimWechatActionReply(userOpenid, "first_time_no");
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
       content = queueWechatAsyncReply({
         openid: userOpenid,
         context: "first_time_no",
         buildContent: () => handleFirstTimeNo(userOpenid, request),
       });
     } else if (isAgreeKeyword(normalizedText)) {
+      content = tryClaimWechatActionReply(userOpenid, "consent");
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
       content = queueWechatAsyncReply({
         openid: userOpenid,
         context: "consent",
         buildContent: () => handleConsent(userOpenid),
       });
     } else if (isStartTestKeyword(normalizedText) || normalizedText === "重新测试") {
+      content = tryClaimWechatActionReply(userOpenid, normalizedText === "重新测试" ? "restart_test" : "start_test");
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
       content = queueWechatAsyncReply({
         openid: userOpenid,
         context: normalizedText === "重新测试" ? "restart_test" : "start_test",
         buildContent: () => handleStartTest(userOpenid, request),
       });
     } else if (isStartFormalKeyword(normalizedText)) {
+      content = tryClaimWechatActionReply(userOpenid, "start_formal");
+      if (content) {
+        return xmlResponse(
+          buildWechatPassiveTextReply({
+            toUserOpenid: userOpenid,
+            fromOfficialUserName: officialId,
+            content,
+          }),
+        );
+      }
       content = queueWechatAsyncReply({
         openid: userOpenid,
         context: "start_formal",
