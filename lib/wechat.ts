@@ -113,29 +113,40 @@ export async function getWechatAccessToken(): Promise<string | null> {
   if (tokenCache.token && now < tokenCache.deadline) {
     return tokenCache.token;
   }
-  const query = new URLSearchParams({
-    grant_type: "client_credential",
-    appid: env.WECHAT_APP_ID,
-    secret: env.WECHAT_APP_SECRET,
-  });
-  console.info("wechat token request started");
+
+  console.info("wechat stable token request started");
   const response = await fetchWithTimeout(
-    `https://api.weixin.qq.com/cgi-bin/token?${query.toString()}`,
+    "https://api.weixin.qq.com/cgi-bin/stable_token",
     {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        grant_type: "client_credential",
+        appid: env.WECHAT_APP_ID,
+        secret: env.WECHAT_APP_SECRET,
+        force_refresh: false,
+      }),
       cache: "no-store",
     },
     WECHAT_TOKEN_TIMEOUT_MS,
-    "wechat token request",
+    "wechat stable token request",
   );
-  const payload = (await response.json()) as { access_token?: string; expires_in?: number };
+  const payload = (await response.json()) as {
+    access_token?: string;
+    expires_in?: number;
+    errcode?: number;
+    errmsg?: string;
+  };
   if (!response.ok || !payload.access_token) {
-    console.error("wechat token request failed", payload);
+    console.error("wechat stable token request failed", payload);
     return null;
   }
   const expires = payload.expires_in ?? 7200;
   tokenCache.token = payload.access_token;
   tokenCache.deadline = now + Math.max(120_000, (expires - 300) * 1000);
-  console.info("wechat token request succeeded", { expiresIn: expires });
+  console.info("wechat stable token request succeeded", { expiresIn: expires });
   return tokenCache.token;
 }
 
