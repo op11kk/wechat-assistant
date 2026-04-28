@@ -1,12 +1,9 @@
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { hasBackendProxyOrigin, proxyToBackend } from "@/lib/backend-proxy";
-import {
-  deriveWorkflowState,
-  H5_SCENES,
-  parseSubmissionMeta,
-} from "@/lib/h5-workflow";
+import { deriveWorkflowState, H5_SCENES, parseSubmissionMeta } from "@/lib/h5-workflow";
 import {
   decorateSubmissionObjectUrl,
+  findLeaderPromoterByCode,
   findParticipantByCode,
   listVideoSubmissionsByParticipantId,
 } from "@/lib/video-submissions";
@@ -76,6 +73,7 @@ export async function GET(request: Request, context: Params) {
     const url = new URL(request.url);
     return proxyToBackend(request, url.pathname, url.search);
   }
+
   const corsHeaders = withCorsHeaders(undefined, request.headers.get("origin"), "GET,OPTIONS");
   const { participantCode } = await context.params;
   const code = participantCode.trim();
@@ -99,6 +97,9 @@ export async function GET(request: Request, context: Params) {
 
     const submissions = await listVideoSubmissionsByParticipantId(participant.id, 20);
     const workflow = deriveWorkflowState(participant, submissions);
+    const leaderReferral = participant.leader_promo_code
+      ? await findLeaderPromoterByCode(participant.leader_promo_code)
+      : null;
 
     return jsonResponse(
       {
@@ -109,6 +110,21 @@ export async function GET(request: Request, context: Params) {
           display_name: maskName(participant.real_name),
           display_phone: maskPhone(participant.phone),
         },
+        leader_referral: leaderReferral
+          ? {
+              promoter_id: leaderReferral.id,
+              promoter_name: leaderReferral.promoter_name,
+              promo_code: leaderReferral.promo_code,
+              status: leaderReferral.status,
+            }
+          : participant.leader_promo_code
+            ? {
+                promoter_id: participant.leader_promoter_id,
+                promoter_name: "已绑定团长",
+                promo_code: participant.leader_promo_code,
+                status: "active",
+              }
+            : null,
         workflow,
         scenes: H5_SCENES.map((scene) => ({
           name: scene,

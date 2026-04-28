@@ -92,6 +92,13 @@ type WorkflowSummary = {
   tips: string[];
 };
 
+type LeaderReferralSummary = {
+  promoter_id: number | null;
+  promoter_name: string;
+  promo_code: string;
+  status: "active" | "disabled";
+};
+
 type ParticipantLookupResponse = {
   participant: {
     id: number;
@@ -100,6 +107,7 @@ type ParticipantLookupResponse = {
     display_name: string;
     display_phone: string;
   };
+  leader_referral: LeaderReferralSummary | null;
   workflow: WorkflowSummary;
   scenes: Array<{
     name: string;
@@ -107,6 +115,13 @@ type ParticipantLookupResponse = {
     description: string;
   }>;
   submissions: SubmissionSummary[];
+};
+
+type LeaderReferralBindResponse = {
+  status: "bound" | "already_bound";
+  participant_code: string;
+  leader_referral: LeaderReferralSummary | null;
+  detail: string | null;
 };
 
 const STORAGE_KEY = "h5-multipart-session-v2";
@@ -259,6 +274,10 @@ function formatLogValue(value: unknown): string {
     return value;
   }
   return JSON.stringify(value, null, 2);
+}
+
+function normalizeSixDigitCode(value: string): string {
+  return value.replace(/\D/g, "").slice(0, 6);
 }
 
 function readStoredSession(): StoredMultipartSession | null {
@@ -510,6 +529,7 @@ export default function H5UploadClient() {
   const searchParams = useSearchParams();
   const openedFromMenu = searchParams.get("from")?.trim() === "menu";
   const [participantCodeInput, setParticipantCodeInput] = useState("");
+  const [leaderPromoCodeInput, setLeaderPromoCodeInput] = useState("");
   const [viewer, setViewer] = useState<ParticipantLookupResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
@@ -567,18 +587,94 @@ export default function H5UploadClient() {
     }
   };
 
+  const confirmParticipantAccess = async (
+    code: string,
+    options?: {
+      leaderPromoCode?: string;
+    },
+  ) => {
+    const normalizedCode = normalizeSixDigitCode(code);
+    const normalizedLeaderPromoCode = normalizeSixDigitCode(options?.leaderPromoCode ?? leaderPromoCodeInput);
+
+    if (!normalizedCode) {
+      setViewer(null);
+      setViewerError("请先输入 6 位身份码。");
+      return;
+    }
+
+    setIsLookingUp(true);
+    setViewerError(null);
+
+    let fallbackViewer: ParticipantLookupResponse | null = null;
+
+    try {
+      const nextViewer = await fetchJson<ParticipantLookupResponse>(
+        `/api/h5/code/${encodeURIComponent(normalizedCode)}`,
+      );
+      fallbackViewer = nextViewer;
+
+      let resolvedViewer = nextViewer;
+      const currentBoundLeaderCode = nextViewer.leader_referral?.promo_code ?? "";
+
+      if (normalizedLeaderPromoCode) {
+        if (currentBoundLeaderCode && currentBoundLeaderCode !== normalizedLeaderPromoCode) {
+          setViewer(nextViewer);
+          setLeaderPromoCodeInput(currentBoundLeaderCode);
+          throw new Error("当前账号已绑定其他团长推广码，暂不支持修改。");
+        }
+
+        if (!currentBoundLeaderCode) {
+          await fetchJson<LeaderReferralBindResponse>("/api/h5/leader-referral/bind", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              participant_code: nextViewer.participant.participant_code,
+              leader_promo_code: normalizedLeaderPromoCode,
+            }),
+          });
+
+          resolvedViewer = await fetchJson<ParticipantLookupResponse>(
+            `/api/h5/code/${encodeURIComponent(normalizedCode)}`,
+          );
+        }
+      }
+
+      setViewer(resolvedViewer);
+      setParticipantCodeInput(resolvedViewer.participant.participant_code);
+      setLeaderPromoCodeInput(resolvedViewer.leader_referral?.promo_code ?? normalizedLeaderPromoCode);
+      const nextScene = resolvedViewer.scenes[0]?.name ?? "";
+      setScene((current) =>
+        current && resolvedViewer.scenes.some((item) => item.name === current) ? current : nextScene,
+      );
+    } catch (error) {
+      setViewer(fallbackViewer);
+      setViewerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsLookingUp(false);
+    }
+  };
+
   useEffect(() => {
     const codeFromQuery = searchParams.get("code")?.trim() ?? "";
+    const leaderPromoCodeFromQuery = normalizeSixDigitCode(
+      searchParams.get("leader")?.trim() ??
+        searchParams.get("promo")?.trim() ??
+        searchParams.get("leaderPromoCode")?.trim() ??
+        "",
+    );
     const nextStored = readStoredSession();
     setStoredSession(nextStored);
 
     const initialCode = codeFromQuery || nextStored?.participantCode || "";
+    setLeaderPromoCodeInput(leaderPromoCodeFromQuery);
     if (!initialCode) {
       return;
     }
 
     setParticipantCodeInput(initialCode);
-    void loadParticipantByCode(initialCode);
+    void confirmParticipantAccess(initialCode, { leaderPromoCode: leaderPromoCodeFromQuery });
   }, [searchParams]);
 
   useEffect(() => {
@@ -942,7 +1038,7 @@ export default function H5UploadClient() {
                 inputMode="numeric"
                 maxLength={6}
                 value={participantCodeInput}
-                onChange={(event) => setParticipantCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                onChange={(event) => setParticipantCodeInput(normalizeSixDigitCode(event.target.value))}
                 placeholder="请输入公众号里收到的 6 位身份码"
               />
               <p className="field-hint">
@@ -951,12 +1047,33 @@ export default function H5UploadClient() {
                   : "如果你是从公众号链接进入，系统通常会自动带入身份码。"}
               </p>
             </div>
+            <div className="field">
+              <label htmlFor="leaderPromoCode">团长推广码</label>
+              <input
+                id="leaderPromoCode"
+                inputMode="numeric"
+                maxLength={6}
+                value={leaderPromoCodeInput}
+                onChange={(event) => setLeaderPromoCodeInput(normalizeSixDigitCode(event.target.value))}
+                placeholder="如有团长推广码，请输入 6 位数字"
+                disabled={Boolean(viewer?.leader_referral)}
+              />
+              <p className="field-hint">
+                {viewer?.leader_referral
+                  ? `已绑定团长：${viewer.leader_referral.promoter_name}（推广码 ${viewer.leader_referral.promo_code}）`
+                  : "如有团长推广码，请在确认身份码前填写；首次绑定成功后不可修改。"}
+              </p>
+            </div>
           </div>
           <div className="submit-row">
             <button
               className="submit-button"
               disabled={isLookingUp || participantCodeInput.trim().length === 0}
-              onClick={() => void loadParticipantByCode(participantCodeInput)}
+              onClick={() =>
+                void confirmParticipantAccess(participantCodeInput, {
+                  leaderPromoCode: leaderPromoCodeInput,
+                })
+              }
               type="button"
             >
               <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>

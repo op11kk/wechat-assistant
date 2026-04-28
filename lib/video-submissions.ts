@@ -22,10 +22,23 @@ export type ParticipantRow = {
   phone: string;
   participant_code: string;
   status: string;
+  leader_promoter_id: number | null;
+  leader_promo_code: string | null;
+  leader_bound_at: string | null;
   consent_confirmed: boolean | null;
   test_status: H5TestStatus | null;
   formal_status: H5FormalStatus | null;
   extra: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LeaderPromoterRow = {
+  id: number;
+  promoter_name: string;
+  promo_code: string;
+  status: "active" | "disabled";
+  note: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -133,10 +146,25 @@ function mapParticipantRow(row: QueryResultRow): ParticipantRow {
     phone: String(row.phone),
     participant_code: String(row.participant_code),
     status: String(row.status),
+    leader_promoter_id: parseNullableInteger(row.leader_promoter_id),
+    leader_promo_code: row.leader_promo_code ? String(row.leader_promo_code) : null,
+    leader_bound_at: row.leader_bound_at ? String(row.leader_bound_at) : null,
     consent_confirmed: row.consent_confirmed === null || row.consent_confirmed === undefined ? null : Boolean(row.consent_confirmed),
     test_status: row.test_status ? String(row.test_status) as H5TestStatus : null,
     formal_status: row.formal_status ? String(row.formal_status) as H5FormalStatus : null,
     extra: row.extra && typeof row.extra === "object" && !Array.isArray(row.extra) ? row.extra as Record<string, unknown> : {},
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function mapLeaderPromoterRow(row: QueryResultRow): LeaderPromoterRow {
+  return {
+    id: parseInteger(row.id),
+    promoter_name: String(row.promoter_name),
+    promo_code: String(row.promo_code),
+    status: String(row.status) as LeaderPromoterRow["status"],
+    note: row.note ? String(row.note) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };
@@ -186,6 +214,14 @@ export async function findParticipantById(participantId: number): Promise<Partic
     [participantId],
   );
   return row ? mapParticipantRow(row) : null;
+}
+
+export async function findLeaderPromoterByCode(promoCode: string): Promise<LeaderPromoterRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select * from public.team_leader_promoters where promo_code = $1 limit 1`,
+    [promoCode],
+  );
+  return row ? mapLeaderPromoterRow(row) : null;
 }
 
 export async function updateParticipantWorkflow(
@@ -250,6 +286,106 @@ export async function updateParticipantExtra(
     [nextExtra, participantId],
   );
   return row ? mapParticipantRow(row) : null;
+}
+
+export async function bindParticipantLeaderPromoter(params: {
+  participantCode: string;
+  leaderPromoCode: string;
+  source?: "h5";
+}): Promise<{
+  status: "bound" | "already_bound" | "invalid_code" | "disabled" | "participant_not_found";
+  participant?: ParticipantRow;
+  promoter?: LeaderPromoterRow;
+  detail?: string;
+}> {
+  const normalizedParticipantCode = params.participantCode.trim();
+  const normalizedLeaderPromoCode = params.leaderPromoCode.trim();
+
+  return withDbTransaction(async (client) => {
+    const participantResult = await client.query(
+      `select * from public.participants where participant_code = $1 limit 1`,
+      [normalizedParticipantCode],
+    );
+    const participantRow = participantResult.rows[0];
+    if (!participantRow) {
+      return {
+        status: "participant_not_found" as const,
+        detail: "身份码不存在，请先确认身份码。",
+      };
+    }
+
+    const participant = mapParticipantRow(participantRow);
+    if (participant.leader_promoter_id && participant.leader_promo_code) {
+      const promoterResult = await client.query(
+        `select * from public.team_leader_promoters where id = $1 limit 1`,
+        [participant.leader_promoter_id],
+      );
+      const promoterRow = promoterResult.rows[0];
+      const promoter = promoterRow ? mapLeaderPromoterRow(promoterRow) : undefined;
+      return {
+        status: "already_bound" as const,
+        participant,
+        promoter,
+        detail:
+          participant.leader_promo_code === normalizedLeaderPromoCode
+            ? "当前用户已绑定该团长推广码。"
+            : "当前用户已绑定其他团长推广码，不能重复修改。",
+      };
+    }
+
+    const promoterResult = await client.query(
+      `select * from public.team_leader_promoters where promo_code = $1 limit 1`,
+      [normalizedLeaderPromoCode],
+    );
+    const promoterRow = promoterResult.rows[0];
+    if (!promoterRow) {
+      return {
+        status: "invalid_code" as const,
+        participant,
+        detail: "团长推广码不存在，请检查后重试。",
+      };
+    }
+
+    const promoter = mapLeaderPromoterRow(promoterRow);
+    if (promoter.status !== "active") {
+      return {
+        status: "disabled" as const,
+        participant,
+        promoter,
+        detail: "该团长推广码已停用，请联系团长确认。",
+      };
+    }
+
+    const updatedParticipantResult = await client.query(
+      `update public.participants
+       set leader_promoter_id = $1,
+           leader_promo_code = $2,
+           leader_bound_at = now(),
+           updated_at = now()
+       where id = $3
+       returning *`,
+      [promoter.id, promoter.promo_code, participant.id],
+    );
+
+    const updatedParticipant = mapParticipantRow(updatedParticipantResult.rows[0]);
+
+    await client.query(
+      `insert into public.participant_referral_bind_logs (
+         participant_id,
+         participant_code,
+         leader_promoter_id,
+         leader_promo_code,
+         source
+       ) values ($1, $2, $3, $4, $5)`,
+      [updatedParticipant.id, updatedParticipant.participant_code, promoter.id, promoter.promo_code, params.source ?? "h5"],
+    );
+
+    return {
+      status: "bound" as const,
+      participant: updatedParticipant,
+      promoter,
+    };
+  });
 }
 
 export async function findParticipantByCodeAndOpenId(
