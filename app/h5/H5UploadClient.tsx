@@ -124,6 +124,8 @@ type LeaderReferralBindResponse = {
   detail: string | null;
 };
 
+type AccessConfirmState = "idle" | "success" | "invalid" | "network";
+
 const STORAGE_KEY = "h5-multipart-session-v2";
 const MAX_RETRIES_PER_PART = 3;
 const DEFAULT_REMOTE_API_ORIGIN = "https://api.capego.top";
@@ -280,6 +282,19 @@ function normalizeSixDigitCode(value: string): string {
   return value.replace(/\D/g, "").slice(0, 6);
 }
 
+function isNetworkErrorLike(error: unknown): boolean {
+  if (error instanceof FetchJsonError) {
+    return false;
+  }
+  if (error instanceof TypeError) {
+    return true;
+  }
+  if (error instanceof Error) {
+    return /failed to fetch|network|timeout|timed out|load failed|abort/i.test(error.message);
+  }
+  return false;
+}
+
 function readStoredSession(): StoredMultipartSession | null {
   if (typeof window === "undefined") {
     return null;
@@ -405,25 +420,6 @@ function formatDate(value: string | null | undefined): string {
   )} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function getStageLabel(stage: WorkflowSummary["stage"]): string {
-  if (stage === "formal_available") {
-    return "正式任务";
-  }
-  if (stage === "formal_uploaded_pending_review") {
-    return "正式任务审核中";
-  }
-  if (stage === "test_failed") {
-    return "重新测试";
-  }
-  if (stage === "test_uploaded_pending_review") {
-    return "测试审核中";
-  }
-  if (stage === "new_unconfirmed") {
-    return "待确认";
-  }
-  return "测试阶段";
-}
-
 function getUploadButtonLabel(kind: H5UploadKind, canResumeCurrentFile: boolean, isUploading: boolean): string {
   if (isUploading) {
     return "正在上传，请稍候";
@@ -495,36 +491,6 @@ function uploadPartWithProgress(
 }
 
 
-function buildStatusSummary(params: {
-  workflow: WorkflowSummary | null;
-  progress: number;
-  isUploading: boolean;
-  isFinalizingUpload: boolean;
-  latestLog: LogLine | null;
-}) {
-  if (params.isUploading) {
-    return `正在上传中，当前进度 ${params.progress}%。请保持页面停留在前台，不要关闭页面。`;
-  }
-
-  if (params.isFinalizingUpload) {
-    return "视频文件已上传完成，正在等待服务器确认，请不要关闭页面。";
-  }
-
-  if (params.latestLog?.type === "success") {
-    return "视频已提交成功，系统会尽快完成审核。";
-  }
-
-  if (params.latestLog?.type === "error") {
-    return params.latestLog.text;
-  }
-
-  if (!params.workflow) {
-    return "请输入公众号里收到的 6 位上传码，验证后即可进入对应任务。";
-  }
-
-  return params.workflow.current_description;
-}
-
 export default function H5UploadClient() {
   const searchParams = useSearchParams();
   const openedFromMenu = searchParams.get("from")?.trim() === "menu";
@@ -541,6 +507,7 @@ export default function H5UploadClient() {
   const [isFinalizingUpload, setIsFinalizingUpload] = useState(false);
   const [isUploadConfirmed, setIsUploadConfirmed] = useState(false);
   const [storedSession, setStoredSession] = useState<StoredMultipartSession | null>(null);
+  const [accessConfirmState, setAccessConfirmState] = useState<AccessConfirmState>("idle");
   const uploadInFlightRef = useRef(false);
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
@@ -563,6 +530,7 @@ export default function H5UploadClient() {
     if (!normalizedCode) {
       setViewer(null);
       setViewerError("请先输入 6 位身份码。");
+      setAccessConfirmState("invalid");
       return;
     }
 
@@ -644,13 +612,20 @@ export default function H5UploadClient() {
       setViewer(resolvedViewer);
       setParticipantCodeInput(resolvedViewer.participant.participant_code);
       setLeaderPromoCodeInput(resolvedViewer.leader_referral?.promo_code ?? normalizedLeaderPromoCode);
+      setAccessConfirmState("success");
       const nextScene = resolvedViewer.scenes[0]?.name ?? "";
       setScene((current) =>
         current && resolvedViewer.scenes.some((item) => item.name === current) ? current : nextScene,
       );
     } catch (error) {
       setViewer(fallbackViewer);
-      setViewerError(error instanceof Error ? error.message : String(error));
+      if (isNetworkErrorLike(error)) {
+        setViewerError("网络错误，请重试");
+        setAccessConfirmState("network");
+      } else {
+        setViewerError(error instanceof Error ? error.message : String(error));
+        setAccessConfirmState("invalid");
+      }
     } finally {
       setIsLookingUp(false);
     }
@@ -696,6 +671,15 @@ export default function H5UploadClient() {
   const resolvedParticipantCode = viewer?.participant.participant_code ?? participantCodeInput.trim();
   const activeUploadKind = viewer?.workflow.current_upload_kind ?? "test";
   const canUpload = Boolean(viewer?.workflow.can_upload && viewer?.participant);
+  const isAccessConfirmed = accessConfirmState === "success" && Boolean(viewer?.participant);
+  const confirmButtonLabel =
+    accessConfirmState === "success"
+      ? "已确认，请开始"
+      : accessConfirmState === "invalid"
+        ? "上传码错误，请重试"
+        : accessConfirmState === "network"
+          ? "网络错误，请重试"
+          : "请确认上传码";
 
   const canResumeCurrentFile =
     Boolean(storedSession) &&
@@ -992,14 +976,6 @@ export default function H5UploadClient() {
     }
   };
 
-  const summaryText = buildStatusSummary({
-    workflow: viewer?.workflow ?? null,
-    progress,
-    isUploading,
-    isFinalizingUpload,
-    latestLog,
-  });
-
   return (
     <main className="upload-shell">
       <section className="upload-panel">
@@ -1012,7 +988,7 @@ export default function H5UploadClient() {
           </p>
         </header>
 
-        <div className="status-panel feature-panel" style={{ marginTop: 24, marginBottom: 16 }}>
+        <div className="status-panel feature-panel" style={{ fontWeight: 600, marginTop: 24, marginBottom: 16 }}>
           <div className="feature-grid">
             <div className="feature-item">
               <strong>用途说明</strong>
@@ -1030,7 +1006,7 @@ export default function H5UploadClient() {
         </div>
 
         <div className="status-panel" style={{ marginBottom: 16 }}>
-          <div className="form-grid" style={{ marginTop: 0 }}>
+          <div className="form-grid code-entry-grid" style={{ marginTop: 0 }}>
             <div className="field">
               <label htmlFor="participantCode">身份码</label>
               <input
@@ -1038,7 +1014,12 @@ export default function H5UploadClient() {
                 inputMode="numeric"
                 maxLength={6}
                 value={participantCodeInput}
-                onChange={(event) => setParticipantCodeInput(normalizeSixDigitCode(event.target.value))}
+                onChange={(event) => {
+                  setParticipantCodeInput(normalizeSixDigitCode(event.target.value));
+                  setAccessConfirmState("idle");
+                  setViewer(null);
+                  setViewerError(null);
+                }}
                 placeholder="请输入公众号里收到的 6 位身份码"
               />
               <p className="field-hint">
@@ -1047,27 +1028,32 @@ export default function H5UploadClient() {
                   : "如果你是从公众号链接进入，系统通常会自动带入身份码。"}
               </p>
             </div>
-            <div className="field">
-              <label htmlFor="leaderPromoCode">团长推广码</label>
-              <input
-                id="leaderPromoCode"
-                inputMode="numeric"
-                maxLength={6}
-                value={leaderPromoCodeInput}
-                onChange={(event) => setLeaderPromoCodeInput(normalizeSixDigitCode(event.target.value))}
-                placeholder="如有团长推广码，请输入 6 位数字"
-                disabled={Boolean(viewer?.leader_referral)}
-              />
-              <p className="field-hint">
-                {viewer?.leader_referral
-                  ? `已绑定团长：${viewer.leader_referral.promoter_name}（推广码 ${viewer.leader_referral.promo_code}）`
-                  : "如有团长推广码，请在确认身份码前填写；首次绑定成功后不可修改。"}
-              </p>
-            </div>
+          </div>
+          <div className="field referral-field" style={{ marginTop: 14 }}>
+            <label htmlFor="leaderPromoCodeClean">推荐码(可选)</label>
+            <input
+              id="leaderPromoCodeClean"
+              inputMode="numeric"
+              maxLength={6}
+              value={leaderPromoCodeInput}
+              onChange={(event) => {
+                setLeaderPromoCodeInput(normalizeSixDigitCode(event.target.value));
+                if (!viewer?.leader_referral) {
+                  setAccessConfirmState("idle");
+                  setViewerError(null);
+                }
+              }}
+              placeholder="如有推荐码，请输入 6 位数字"
+              disabled={Boolean(viewer?.leader_referral)}
+            />
+            <p className="field-hint">
+              如果是通过团长渠道开始任务则填写推荐码，若不是则不用填写。
+            </p>
           </div>
           <div className="submit-row">
             <button
-              className="submit-button"
+              className="submit-button confirm-status-button"
+              data-label={confirmButtonLabel}
               disabled={isLookingUp || participantCodeInput.trim().length === 0}
               onClick={() =>
                 void confirmParticipantAccess(participantCodeInput, {
@@ -1098,23 +1084,15 @@ export default function H5UploadClient() {
           {viewerError ? <p className="field-hint" style={{ marginTop: 14 }}>{viewerError}</p> : null}
         </div>
 
-        {viewer?.participant ? (
-          <div className="status-panel" style={{ marginBottom: 16 }}>
+        {isAccessConfirmed && viewer?.participant ? (
+          <div className="status-panel identity-panel" style={{ marginBottom: 16 }}>
             <div className="status-row">
               <div className="status-chip">身份码 {viewer.participant.participant_code}</div>
-              <div className="status-chip">当前状态 {getStageLabel(viewer.workflow.stage)}</div>
-            </div>
-            <p className="field-hint">
-              当前用户：{viewer.participant.display_name} / {viewer.participant.display_phone}
-            </p>
-            <div className="callout-box">
-              <strong>{viewer.workflow.current_title}</strong>
-              <p>{summaryText}</p>
             </div>
           </div>
         ) : null}
 
-        {storedSession ? (
+        {isAccessConfirmed && storedSession ? (
           <div className="status-panel" style={{ marginBottom: 16 }}>
             <div className="status-row">
               <div className="status-chip">发现未完成上传</div>
@@ -1131,18 +1109,12 @@ export default function H5UploadClient() {
           </div>
         ) : null}
 
-        {viewer?.workflow ? (
-          <div className="status-panel" style={{ marginBottom: 16 }}>
-            <div className="status-row">
-              <div className="status-chip">
-                当前任务：{activeUploadKind === "test" ? "测试视频" : "正式任务视频"}
-              </div>
-            </div>
-            <p className="field-hint">请先选择本次拍摄场景</p>
-
+        {isAccessConfirmed && viewer?.workflow ? (
+          <div className="status-panel workflow-panel" style={{ marginBottom: 16 }}>
             <div className="form-grid" style={{ marginTop: 20 }}>
               <div className="field">
                 <label htmlFor="scene">拍摄场景</label>
+                <p className="field-hint">请选择本次拍摄场景</p>
                 <select id="scene" value={scene} onChange={(event) => setScene(event.target.value)}>
                   <option value="">请选择场景</option>
                   {viewer.scenes.map((item) => (
@@ -1162,6 +1134,7 @@ export default function H5UploadClient() {
 
               <div className="field">
                 <label htmlFor="file">上传视频</label>
+                <p className="field-hint tutorial-hint">请根据教程进行视频拍摄，以提高审核通过率</p>
                 <input
                   id="file"
                   type="file"
@@ -1169,7 +1142,6 @@ export default function H5UploadClient() {
                   onChange={(event) => setFile(event.target.files?.[0] ?? null)}
                 />
                 {file ? <small>已选择：{file.name}（{formatBytes(file.size)}）</small> : null}
-                <p className="field-hint">建议使用第一视角拍摄，画面尽量保持稳定。</p>
                 <p className="field-hint">
                   <strong>视频上传需要时间，请耐心等待，上传完成前请勿关闭页面。</strong>
                 </p>
@@ -1245,6 +1217,25 @@ export default function H5UploadClient() {
           to {
             transform: rotate(360deg);
           }
+        }
+
+        .confirm-status-button {
+          color: transparent;
+          position: relative;
+        }
+
+        .confirm-status-button::after {
+          color: #ffffff;
+          content: attr(data-label);
+          left: 50%;
+          position: absolute;
+          top: 50%;
+          transform: translate(-50%, -50%);
+          white-space: nowrap;
+        }
+
+        .tutorial-hint {
+          margin-top: 8px;
         }
       `}</style>
     </main>
