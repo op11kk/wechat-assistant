@@ -480,10 +480,15 @@ function buildStatusSummary(params: {
   workflow: WorkflowSummary | null;
   progress: number;
   isUploading: boolean;
+  isFinalizingUpload: boolean;
   latestLog: LogLine | null;
 }) {
   if (params.isUploading) {
     return `正在上传中，当前进度 ${params.progress}%。请保持页面停留在前台，不要关闭页面。`;
+  }
+
+  if (params.isFinalizingUpload) {
+    return "视频文件已上传完成，正在等待服务器确认，请不要关闭页面。";
   }
 
   if (params.latestLog?.type === "success") {
@@ -513,6 +518,8 @@ export default function H5UploadClient() {
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [isFinalizingUpload, setIsFinalizingUpload] = useState(false);
+  const [isUploadConfirmed, setIsUploadConfirmed] = useState(false);
   const [storedSession, setStoredSession] = useState<StoredMultipartSession | null>(null);
   const uploadInFlightRef = useRef(false);
 
@@ -574,6 +581,22 @@ export default function H5UploadClient() {
     void loadParticipantByCode(initialCode);
   }, [searchParams]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || (!isUploading && !isFinalizingUpload)) {
+      return;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [isFinalizingUpload, isUploading]);
+
   const resolvedParticipantCode = viewer?.participant.participant_code ?? participantCodeInput.trim();
   const activeUploadKind = viewer?.workflow.current_upload_kind ?? "test";
   const canUpload = Boolean(viewer?.workflow.can_upload && viewer?.participant);
@@ -594,6 +617,8 @@ export default function H5UploadClient() {
   const handleSubmit = async () => {
     setLogs([]);
     setProgress(0);
+    setIsUploadConfirmed(false);
+    setIsFinalizingUpload(false);
 
     if (!viewer?.participant || !viewer.workflow) {
       appendLog("error", "请先输入上传码并完成验证。");
@@ -720,7 +745,7 @@ export default function H5UploadClient() {
           uploadedBytes += loadedBytes;
         }
 
-        const nextProgress = Math.min(100, Math.round((uploadedBytes / selectedFile.size) * 100));
+        const nextProgress = Math.min(99, Math.round((uploadedBytes / selectedFile.size) * 100));
         setProgress(nextProgress);
       };
 
@@ -813,6 +838,8 @@ export default function H5UploadClient() {
       );
 
       appendLog("info", "视频已上传完成，正在提交审核。");
+      setIsUploading(false);
+      setIsFinalizingUpload(true);
 
       const parts = Array.from(uploadedParts.entries())
         .sort(([a], [b]) => a - b)
@@ -831,6 +858,8 @@ export default function H5UploadClient() {
       });
 
       setProgress(100);
+      setIsFinalizingUpload(false);
+      setIsUploadConfirmed(true);
       appendLog(
         "success",
         activeUploadKind === "test"
@@ -841,6 +870,8 @@ export default function H5UploadClient() {
       setFile(null);
       await loadParticipantByCode(viewer.participant.participant_code);
     } catch (error) {
+      setIsFinalizingUpload(false);
+      setIsUploadConfirmed(false);
       appendLog("error", error instanceof Error ? error.message : String(error));
     } finally {
       uploadInFlightRef.current = false;
@@ -869,6 +900,7 @@ export default function H5UploadClient() {
     workflow: viewer?.workflow ?? null,
     progress,
     isUploading,
+    isFinalizingUpload,
     latestLog,
   });
 
@@ -1030,6 +1062,8 @@ export default function H5UploadClient() {
             <div className="progress-stack">
               <div className="status-row">
                 <div className="progress-chip">上传进度 {progress}%</div>
+                {isFinalizingUpload ? <div className="status-chip">视频马上上传成功，请等待</div> : null}
+                {isUploadConfirmed ? <div className="status-chip">已确认上传成功</div> : null}
                 {canResumeCurrentFile ? <div className="status-chip">支持继续上传</div> : null}
               </div>
               <div aria-hidden="true" className="progress-track">
