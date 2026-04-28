@@ -672,14 +672,14 @@ export default function H5UploadClient() {
   const activeUploadKind = viewer?.workflow.current_upload_kind ?? "test";
   const canUpload = Boolean(viewer?.workflow.can_upload && viewer?.participant);
   const isAccessConfirmed = accessConfirmState === "success" && Boolean(viewer?.participant);
-  const confirmButtonLabel =
+  const confirmInlineMessage =
     accessConfirmState === "success"
-      ? "已确认，请开始"
+      ? "确认成功"
       : accessConfirmState === "invalid"
         ? "上传码错误，请重试"
         : accessConfirmState === "network"
           ? "网络错误，请重试"
-          : "请确认上传码";
+          : null;
 
   const canResumeCurrentFile =
     Boolean(storedSession) &&
@@ -1050,47 +1050,46 @@ export default function H5UploadClient() {
               如果是通过团长渠道开始任务则填写推荐码，若不是则不用填写。
             </p>
           </div>
-          <div className="submit-row">
-            <button
-              className="submit-button confirm-status-button"
-              data-label={confirmButtonLabel}
-              disabled={isLookingUp || participantCodeInput.trim().length === 0}
-              onClick={() =>
-                void confirmParticipantAccess(participantCodeInput, {
-                  leaderPromoCode: leaderPromoCodeInput,
-                })
-              }
-              type="button"
-            >
-              <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>
-                <span>确认上传码</span>
-                {isLookingUp ? (
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      animation: "h5LookupSpin 0.75s linear infinite",
-                      border: "2px solid rgba(255, 255, 255, 0.38)",
-                      borderRadius: "999px",
-                      borderTopColor: "#ffffff",
-                      display: "inline-block",
-                      height: 18,
-                      width: 18,
-                    }}
-                  />
-                ) : null}
+          <div className="submit-row confirm-action-row">
+            {!isAccessConfirmed ? (
+              <button
+                className="submit-button"
+                disabled={isLookingUp || participantCodeInput.trim().length === 0}
+                onClick={() =>
+                  void confirmParticipantAccess(participantCodeInput, {
+                    leaderPromoCode: leaderPromoCodeInput,
+                  })
+                }
+                type="button"
+              >
+                <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>
+                  <span>请确认上传码</span>
+                  {isLookingUp ? (
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        animation: "h5LookupSpin 0.75s linear infinite",
+                        border: "2px solid rgba(255, 255, 255, 0.38)",
+                        borderRadius: "999px",
+                        borderTopColor: "#ffffff",
+                        display: "inline-block",
+                        height: 18,
+                        width: 18,
+                      }}
+                    />
+                  ) : null}
+                </span>
+              </button>
+            ) : null}
+            {confirmInlineMessage ? (
+              <span
+                className={`confirm-feedback ${accessConfirmState === "success" ? "is-success" : "is-error"}`}
+              >
+                {confirmInlineMessage}
               </span>
-            </button>
+            ) : null}
           </div>
-          {viewerError ? <p className="field-hint" style={{ marginTop: 14 }}>{viewerError}</p> : null}
         </div>
-
-        {isAccessConfirmed && viewer?.participant ? (
-          <div className="status-panel identity-panel" style={{ marginBottom: 16 }}>
-            <div className="status-row">
-              <div className="status-chip">身份码 {viewer.participant.participant_code}</div>
-            </div>
-          </div>
-        ) : null}
 
         {isAccessConfirmed && storedSession ? (
           <div className="status-panel" style={{ marginBottom: 16 }}>
@@ -1111,6 +1110,9 @@ export default function H5UploadClient() {
 
         {isAccessConfirmed && viewer?.workflow ? (
           <div className="status-panel workflow-panel" style={{ marginBottom: 16 }}>
+            <div className="status-row" style={{ marginBottom: 18 }}>
+              <div className="status-chip">身份码 {viewer.participant.participant_code}</div>
+            </div>
             <div className="form-grid" style={{ marginTop: 20 }}>
               <div className="field">
                 <label htmlFor="scene">拍摄场景</label>
@@ -1245,6 +1247,25 @@ export default function H5UploadClient() {
 
         .feature-lines p {
           margin: 0;
+        }
+
+        .confirm-action-row {
+          align-items: center;
+          gap: 14px;
+        }
+
+        .confirm-feedback {
+          font-size: 15px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+
+        .confirm-feedback.is-success {
+          color: #1e7f73;
+        }
+
+        .confirm-feedback.is-error {
+          color: #c43c2f;
         }
       `}</style>
     </main>
