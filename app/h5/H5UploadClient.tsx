@@ -649,7 +649,7 @@ export default function H5UploadClient() {
     }
 
     setParticipantCodeInput(initialCode);
-    void confirmParticipantAccess(initialCode, { leaderPromoCode: leaderPromoCodeFromQuery });
+    void loadParticipantByCode(initialCode);
   }, [searchParams]);
 
   useEffect(() => {
@@ -989,19 +989,19 @@ export default function H5UploadClient() {
         </header>
 
         <div className="status-panel feature-panel" style={{ fontWeight: 600, marginTop: 24, marginBottom: 16 }}>
-          <div className="feature-grid">
-            <div className="feature-item">
-              <strong>用途说明</strong>
-              <p>本次提交内容将用于机器人训练与具身智能算法研发。</p>
-            </div>
-            <div className="feature-item">
-              <strong>上传前提示</strong>
-              <p>请先选择场景，再上传对应视频；上传过程中不要关闭页面。</p>
-            </div>
-            <div className="feature-item">
-              <strong>审核规则</strong>
-              <p>测试视频仅用于审核拍摄质量，不计收益；正式视频提交后进入审核流程。</p>
-            </div>
+          <div className="feature-lines">
+            <p>
+              <strong>用途说明：</strong>
+              本次提交内容将用于机器人训练与具身智能算法研发。
+            </p>
+            <p>
+              <strong>上传前提示：</strong>
+              请先选择场景，再上传对应视频；上传过程中不要关闭页面。
+            </p>
+            <p>
+              <strong>审核规则：</strong>
+              测试视频仅用于审核拍摄质量，不计收益；正式视频提交后进入审核流程。
+            </p>
           </div>
         </div>
 
@@ -1183,7 +1183,7 @@ export default function H5UploadClient() {
                 <p>
                   <strong>{submission.file_name || `视频 #${submission.id}`}</strong>
                 </p>
-                <p className="field-hint">待审核场景：{submission.scene || "未记录"}</p>
+                {submission.scene ? <p className="field-hint">待审核场景：{submission.scene}</p> : null}
                 <p className="field-hint">提交时间：{formatDate(submission.created_at)}</p>
               </article>
             ))}
@@ -1236,6 +1236,15 @@ export default function H5UploadClient() {
 
         .tutorial-hint {
           margin-top: 8px;
+        }
+
+        .feature-lines {
+          display: grid;
+          gap: 14px;
+        }
+
+        .feature-lines p {
+          margin: 0;
         }
       `}</style>
     </main>
