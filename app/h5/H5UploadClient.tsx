@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { encodeSubmissionMeta, type H5UploadKind } from "@/lib/h5-workflow";
@@ -293,6 +293,10 @@ function isNetworkErrorLike(error: unknown): boolean {
     return /failed to fetch|network|timeout|timed out|load failed|abort/i.test(error.message);
   }
   return false;
+}
+
+function isNetworkLikeMessage(message: string): boolean {
+  return /网络|timeout|timed out|failed to fetch|network|中断|断开/i.test(message);
 }
 
 function readStoredSession(): StoredMultipartSession | null {
@@ -690,9 +694,13 @@ export default function H5UploadClient() {
     storedSession?.sizeBytes === file?.size &&
     storedSession?.scene === scene &&
     storedSession?.uploadKind === activeUploadKind;
-
-  const visibleLogs = useMemo(() => logs.slice(-6), [logs]);
   const selectedSceneMeta = viewer?.scenes.find((item) => item.name === scene) ?? null;
+  const uploadFailureReason =
+    latestLog?.type === "error"
+      ? isNetworkLikeMessage(latestLog.text)
+        ? "网络断开失败"
+        : "上传失败"
+      : null;
 
   const handleSubmit = async () => {
     setLogs([]);
@@ -1154,7 +1162,9 @@ export default function H5UploadClient() {
               <div className="status-row">
                 <div className="progress-chip">上传进度 {progress}%</div>
                 {isFinalizingUpload ? <div className="status-chip">视频马上上传成功，请等待</div> : null}
-                {isUploadConfirmed ? <div className="status-chip">已确认上传成功</div> : null}
+                {isUploadConfirmed ? <div className="status-chip success-chip">上传成功</div> : null}
+                {latestLog?.type === "error" ? <div className="status-chip error-chip">上传失败</div> : null}
+                {uploadFailureReason ? <div className="status-chip error-chip">{uploadFailureReason}</div> : null}
                 {canResumeCurrentFile ? <div className="status-chip">支持继续上传</div> : null}
               </div>
               <div aria-hidden="true" className="progress-track">
@@ -1192,25 +1202,6 @@ export default function H5UploadClient() {
           </div>
         </section>
       ) : null}
-
-      <section className="status-panel">
-        <details className="log-details">
-          <summary>查看上传进度记录</summary>
-          <pre className="status-log">
-            {visibleLogs.length === 0
-              ? "暂时还没有上传记录。"
-              : visibleLogs.map((line, index) => (
-                  <span
-                    className={line.type === "error" ? "error-line" : line.type === "success" ? "success-line" : ""}
-                    key={`${line.type}-${index}`}
-                  >
-                    {line.text}
-                    {"\n"}
-                  </span>
-                ))}
-          </pre>
-        </details>
-      </section>
       <style jsx>{`
         @keyframes h5LookupSpin {
           from {
@@ -1265,6 +1256,14 @@ export default function H5UploadClient() {
         }
 
         .confirm-feedback.is-error {
+          color: #c43c2f;
+        }
+
+        .status-chip.success-chip {
+          color: #1e7f73;
+        }
+
+        .status-chip.error-chip {
           color: #c43c2f;
         }
       `}</style>
