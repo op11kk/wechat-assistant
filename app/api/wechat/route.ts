@@ -30,18 +30,32 @@ type FlowStage =
 
 const MENU_GUIDE_KEY = "MENU_GUIDE";
 const MENU_CODE_KEY = "MENU_CODE";
+const MENU_UPLOAD_KEY = "MENU_UPLOAD";
 const ACTION_DEDUP_WINDOW_MS = 3_000;
+const IDENTITY_CODE_CACHE_WINDOW_MS = 30_000;
 const recentWechatActions = new Map<string, number>();
+const identityCodeReplyCache = new Map<string, { content: string; timestamp: number }>();
 
-const ASYNC_PROCESSING_REPLY = [
-  "⏳ 正在处理中",
-  "已收到您的消息，正在为您生成内容，大约需要 3–5 秒，请稍等一下～",
-].join("\n");
+const ASYNC_PROCESSING_REPLY = "";
 
 const DUPLICATE_ACTION_REPLY = [
   "⏳ 正在处理中",
   "请勿重复点击或重复发送，系统会继续处理上一条请求。",
 ].join("\n");
+
+const REVIEW_SETTLEMENT_NOTICE_LINES = [
+  "上传完成后，你可以在页面中查看：",
+  "- 视频是否上传成功",
+  "- 视频当前审核状态",
+  "- 视频最终审核结果",
+  "【审核与结算说明】",
+  "视频提交成功后，我们会在【1–3小时内完成审核】。",
+  "审核通过的视频，将进入当日结算流程。",
+  "当天通过审核的视频，我们会在【下午 5:00 统一结算】。",
+  "届时工作人员会主动联系您确认结算方式，并发放对应奖励。",
+  "请放心，所有视频都会按照统一标准进行审核。",
+  "只要视频符合任务要求并通过审核，就会正常进入结算流程。",
+];
 
 function decorateWechatReplyContent(content: string): string {
   const normalized = content.trim();
@@ -69,12 +83,11 @@ function buildWechatPassiveTextReply(params: {
 
 function buildUnknownCommandReply(): string {
   return [
-    "【💬没看懂没关系】",
-    "你可以这样操作：",
-    "📌 新用户：回复【是】",
-    "📌 开始测试：回复【开始测试】",
-    "📌 开始赚钱：回复【开始】",
-    "或直接点击下方菜单【我该做什么】查看完整步骤。",
+    "【💬操作提示】",
+    "新用户请先回复【我同意】完成授权确认。",
+    "完成后点击菜单【获取身份码】查看身份码，再点击【上传】继续。",
+    "如果你已经有身份码，直接点击菜单【上传】即可。",
+    "如需人工帮助，请回复【人工】。",
   ].join("\n");
 }
 
@@ -102,6 +115,40 @@ function claimWechatAction(openid: string, action: string): boolean {
 
 function tryClaimWechatActionReply(openid: string, action: string): string | null {
   return claimWechatAction(openid, action) ? null : DUPLICATE_ACTION_REPLY;
+}
+
+function pruneIdentityCodeReplyCache(now: number) {
+  for (const [openid, entry] of identityCodeReplyCache.entries()) {
+    if (now - entry.timestamp > IDENTITY_CODE_CACHE_WINDOW_MS) {
+      identityCodeReplyCache.delete(openid);
+    }
+  }
+}
+
+function getCachedIdentityCodeReplyContent(openid: string): string | null {
+  const now = Date.now();
+  pruneIdentityCodeReplyCache(now);
+  const cached = identityCodeReplyCache.get(openid);
+  if (!cached) {
+    return null;
+  }
+  if (now - cached.timestamp > IDENTITY_CODE_CACHE_WINDOW_MS) {
+    identityCodeReplyCache.delete(openid);
+    return null;
+  }
+  return cached.content;
+}
+
+function cacheIdentityCodeReplyContent(openid: string, content: string): string {
+  identityCodeReplyCache.set(openid, {
+    content,
+    timestamp: Date.now(),
+  });
+  return content;
+}
+
+function clearIdentityCodeReplyCache(openid: string) {
+  identityCodeReplyCache.delete(openid);
 }
 
 function getWechatSignatureParams(request: NextRequest) {
@@ -167,12 +214,20 @@ function buildH5Link(request: NextRequest, participantCode?: string): string {
   return url.toString();
 }
 
-function buildIphoneBrowserNotice(): string[] {
-  return [
-    "如果你使用的是 iPhone：",
-    '请点击右上角 ... ，选择“在浏览器打开”，并使用 Safari 完成上传。',
-    "如果在微信内置浏览器里无法上传，这是已知兼容问题。",
-  ];
+function hasClaimedIdentityCode(participant: Awaited<ReturnType<typeof findParticipantByOpenId>>): boolean {
+  if (!participant) {
+    return false;
+  }
+
+  const claimed = participant.extra?.wechat_identity_code_claimed;
+  return claimed !== false;
+}
+
+async function markIdentityCodeClaimed(participantId: number) {
+  await updateParticipantExtra(participantId, {
+    wechat_identity_code_claimed: true,
+    wechat_identity_code_claimed_at: new Date().toISOString(),
+  });
 }
 
 function normalizeUserText(raw: string | null | undefined): string {
@@ -245,35 +300,28 @@ function isOpenIdHintEvent(msgType: string, event: string | null | undefined): b
 
 function buildWelcomeReply(): string {
   return [
-    "欢迎参加视频采集。",
+    "【✨欢迎使用视频素材采集助手】",
     "",
-    "请先确认你是否首次参与：",
-    "回复“是”表示首次参与",
-    "回复“否”表示老用户继续使用",
-    "",
-    "也可以直接使用底部菜单：",
-    "• 我该做什么",
-    "• 上传视频",
-    "• 我的身份码",
+    "这里是视频素材采集小助手，你可以在这里完成参与授权、身份码获取和视频上传。",
+    "你提交的视频素材可能会被用于商业用途，包括但不限于：软件开发、商业合作及相关技术服务。",
+    "请在参与前确认：",
+    "1. 你自愿参与本次视频素材采集；",
+    "2. 你提交的视频为本人合法拍摄或你有权授权使用；",
+    "3. 你同意我们在合法合规范围内，对你提交的视频素材进行存储、复制、分析、处理、交付及商业化使用；",
+    "4. 请勿上传涉及他人隐私、敏感信息、违法违规内容，或未经他人同意的可识别个人信息内容。",
+    "如你已阅读并同意以上内容，请回复：",
+    "【我同意】",
   ].join("\n");
 }
 
 function buildGuideReplyContent(): string {
   return [
     "【📌操作指引】",
-    "不知道该做什么？按下面步骤即可👇",
-    "① 如果你是第一次参与",
-    "👉 回复：【是】（系统会给你身份码）",
-    "② 获取身份码后",
-    "👉 回复：【我同意】（确认参与）",
-    "③ 开始测试视频",
-    "👉 回复：【开始测试】",
-    "④ 测试通过后",
-    "👉 回复：【开始】进入正式任务（可赚钱💰）",
-    "———",
-    "📤 上传视频：点击菜单【上传视频】",
-    "🆔 查看身份码：点击菜单【我的身份码】",
-    "💬 如果需要人工协助，请直接回复：人工",
+    "新用户请先回复【我同意】完成授权确认。",
+    "🆔 获取身份码：点击菜单【获取身份码】",
+    "📤 上传：点击菜单【上传】",
+    "如果你已经有身份码，可直接点击菜单【上传】。",
+    "💬 如果需要人工协助，请直接回复【人工】",
   ].join("\n");
 }
 
@@ -350,53 +398,61 @@ async function buildUploadCodeReplyContent(userOpenid: string, request: NextRequ
   const participant = await findParticipantByOpenId(userOpenid);
 
   if (!participant) {
-    return [
-      "系统里还没有查到你的参与记录。",
-      "如果你是首次参与，请回复“是”。",
-      "如果你是老用户但记录丢失，请联系管理员处理。",
-      "",
-      `openid：${userOpenid}`,
-    ].join("\n");
+    return buildConsentRequiredReply();
   }
 
   const workflow = parseParticipantWorkflowRow(participant);
 
   if (!workflow.consent_confirmed) {
     await setWechatFlowStage(participant.id, "awaiting_consent", "上传码");
+    return buildConsentRequiredReply();
+  }
+
+  if (!hasClaimedIdentityCode(participant)) {
     return [
-      `你的上传码：${participant.participant_code}`,
-      "",
-      "你还没有完成参与确认。",
-      "请回复“我同意”继续。",
+      "【请先获取身份码】",
+      "你当前还没有完成身份码获取。",
+      "请先完成以下步骤：",
+      "1. 请点击菜单【获取身份码】；",
+      "2. 获取身份码后，再点击菜单【上传】提交素材。",
+      "身份码将用于识别你的上传记录、审核结果和后续结算信息。",
     ].join("\n");
   }
 
   if (workflow.test_status === "not_started" || workflow.test_status === "failed") {
     await setWechatFlowStage(participant.id, "awaiting_test_start", "上传码");
-    return [
-      `你的上传码：${participant.participant_code}`,
-      "",
-      "当前阶段：测试阶段。",
-      "请回复“开始测试”进入测试视频页面。",
-    ].join("\n");
-  }
-
-  if (workflow.test_status === "pending") {
+  } else if (workflow.test_status === "pending") {
     await setWechatFlowStage(participant.id, "test_ready", "上传码");
-    return [
-      `你的上传码：${participant.participant_code}`,
-      "",
-      "你的测试视频正在审核中。",
-      "当前无需重复打开页面，等待审核结果即可。",
-    ].join("\n");
+  } else {
+    await setWechatFlowStage(participant.id, "formal_ready", "上传码");
   }
 
-  await setWechatFlowStage(participant.id, "formal_ready", "上传码");
   return [
-    `你的上传码：${participant.participant_code}`,
-    "",
-    "测试已通过，你已进入正式任务阶段。",
-    "请回复“开始”获取正式任务入口。",
+    "【📤上传入口】",
+    "请点击下方链接进入上传页面：",
+    buildH5Link(request, participant.participant_code),
+    "你的身份码是：",
+    `【${participant.participant_code}】`,
+    "进入页面后，请填写 / 确认身份码，并按照任务要求上传视频素材。",
+    ...REVIEW_SETTLEMENT_NOTICE_LINES,
+    "请确保身份码填写正确，以便我们核对你的上传记录和结算信息。",
+    "现在请点击链接开始上传。",
+  ].join("\n");
+}
+
+function buildConsentRequiredReply(): string {
+  return [
+    "【请先完成授权确认】",
+    "为了确保素材采集和使用合规，所有用户都需要先回复：",
+    "【我同意】",
+  ].join("\n");
+}
+
+function buildConsentCompletedReply(): string {
+  return [
+    "【✅授权确认成功】",
+    "你已确认同意参与本次视频素材采集，并授权平台在合法合规范围内使用你提交的视频素材。",
+    "请点击菜单【获取身份码】完成身份识别。",
   ].join("\n");
 }
 
@@ -426,9 +482,6 @@ function getWorkflowNextStepText(workflow: ReturnType<typeof parseParticipantWor
   if (workflow.test_status === "not_started" || workflow.test_status === "failed") {
     return "下一步：请回复【开始测试】进入测试视频上传。";
   }
-  if (workflow.test_status === "pending") {
-    return "下一步：等待测试审核结果，审核通过后再回复【开始】。";
-  }
   return "下一步：请回复【开始】进入正式任务。";
 }
 
@@ -436,33 +489,101 @@ async function buildIdentityCodeReplyContent(userOpenid: string): Promise<string
   const participant = await findParticipantByOpenId(userOpenid);
 
   if (!participant) {
+    return buildConsentRequiredReply();
+  }
+
+  const workflow = parseParticipantWorkflowRow(participant);
+  if (!workflow.consent_confirmed) {
+    return buildConsentRequiredReply();
+  }
+
+  if (!hasClaimedIdentityCode(participant)) {
+    await markIdentityCodeClaimed(participant.id);
     return [
-      "【🆔身份信息】",
-      "暂未查到你的身份码。",
-      "如果你是第一次参与，请先回复【是】完成登记。",
+      "【🎉身份码获取成功】",
+      "欢迎加入视频素材采集计划。",
+      "你的专属身份码是：",
+      `【${participant.participant_code}】`,
+      "请妥善保存此身份码。后续视频上传、审核记录、任务结算和问题核对都将以该身份码为准。",
+      "现在你可以点击菜单【上传】提交视频素材。",
     ].join("\n");
+  }
+
+  return [
+    "【👋欢迎回来】",
+    "你已完成授权确认。",
+    "你的身份码是：",
+    `【${participant.participant_code}】`,
+    "后续视频上传、审核记录、任务结算和问题核对仍将以该身份码为准。",
+    "现在你可以点击菜单【上传】继续提交素材。",
+  ].join("\n");
+}
+
+async function buildUploadMenuReplyContent(userOpenid: string, request: NextRequest): Promise<string> {
+  const participant = await findParticipantByOpenId(userOpenid);
+  if (!participant) {
+    return buildConsentRequiredReply();
   }
 
   const workflow = parseParticipantWorkflowRow(participant);
 
+  if (!workflow.consent_confirmed) {
+    return buildConsentRequiredReply();
+  }
+
+  if (!hasClaimedIdentityCode(participant)) {
+    return [
+      "【请先获取身份码】",
+      "你当前还没有完成身份码获取。",
+      "请先完成以下步骤：",
+      "1. 请点击菜单【获取身份码】；",
+      "2. 获取身份码后，再点击菜单【上传】提交素材。",
+      "身份码将用于识别你的上传记录、审核结果和后续结算信息。",
+    ].join("\n");
+  }
+
+  const h5Link = buildH5Link(request, participant.participant_code);
+
+  if (workflow.test_status === "not_started" || workflow.test_status === "failed") {
+    await setWechatFlowStage(participant.id, "awaiting_test_start", "上传");
+  } else if (workflow.test_status === "pending") {
+    await setWechatFlowStage(participant.id, "test_ready", "上传");
+  } else {
+    await setWechatFlowStage(participant.id, "formal_ready", "上传");
+  }
+
   return [
-    "【🆔身份信息】",
-    `您的身份验证码为：${participant.participant_code}`,
-    "请务必保存该编号，用于：",
-    "• 上传视频",
-    "• 查询审核状态",
-    "• 收益结算",
-    "",
-    `当前状态：${getWorkflowStageLabelForChat(workflow)}`,
-    getWorkflowNextStepText(workflow),
+    "【📤视频上传入口】",
+    "请点击下方链接进入上传页面：",
+    h5Link,
+    "你的身份码是：",
+    `【${participant.participant_code}】`,
+    "进入页面后，请填写 / 确认身份码，并按照任务要求上传视频素材。",
+    ...REVIEW_SETTLEMENT_NOTICE_LINES,
+    "请确保身份码填写正确，以便我们核对你的上传记录和结算信息。",
+    "现在请点击链接开始上传。",
   ].join("\n");
+}
+
+async function buildCachedIdentityCodeReplyContent(userOpenid: string): Promise<string> {
+  const cached = getCachedIdentityCodeReplyContent(userOpenid);
+  if (cached) {
+    return cached;
+  }
+
+  const content = await buildIdentityCodeReplyContent(userOpenid);
+  return cacheIdentityCodeReplyContent(userOpenid, content);
 }
 
 function normalizeMenuEventKey(eventKey: string | null | undefined): string {
   return eventKey?.trim().toUpperCase() ?? "";
 }
 
-async function handleWechatMenuClick(eventKey: string | null | undefined, userOpenid: string): Promise<string | null> {
+async function handleWechatMenuClick(
+  eventKey: string | null | undefined,
+  userOpenid: string,
+  request: NextRequest,
+): Promise<string | null> {
   const normalized = normalizeMenuEventKey(eventKey);
 
   if (normalized === MENU_GUIDE_KEY) {
@@ -474,153 +595,75 @@ async function handleWechatMenuClick(eventKey: string | null | undefined, userOp
   }
 
   if (normalized === MENU_CODE_KEY) {
-    const duplicateReply = tryClaimWechatActionReply(userOpenid, "menu_code");
+    const cached = getCachedIdentityCodeReplyContent(userOpenid);
+    if (cached) {
+      return cached;
+    }
+    return buildCachedIdentityCodeReplyContent(userOpenid);
+  }
+
+  if (normalized === MENU_UPLOAD_KEY) {
+    const duplicateReply = tryClaimWechatActionReply(userOpenid, "menu_upload");
     if (duplicateReply) {
       return duplicateReply;
     }
-    return buildIdentityCodeReplyContent(userOpenid);
+    return buildUploadMenuReplyContent(userOpenid, request);
   }
 
   return null;
 }
 
 async function handleFirstTimeYes(userOpenid: string): Promise<string> {
-  console.info("[wechat] handleFirstTimeYes:start", {
-    openid: userOpenid,
-  });
-
-  const existing = await findParticipantByOpenId(userOpenid);
-  console.info("[wechat] handleFirstTimeYes:existing_lookup", {
-    openid: userOpenid,
-    found: Boolean(existing),
-    participantId: existing?.id ?? null,
-    participantCode: existing?.participant_code ?? null,
-  });
-
-  if (existing) {
-    const workflow = parseParticipantWorkflowRow(existing);
-    console.info("[wechat] handleFirstTimeYes:existing_workflow", {
-      openid: userOpenid,
-      participantId: existing.id,
-      participantCode: existing.participant_code,
-      consentConfirmed: workflow.consent_confirmed,
-      testStatus: workflow.test_status,
-      formalStatus: workflow.formal_status,
-    });
-    if (!workflow.consent_confirmed) {
-      await setWechatFlowStage(existing.id, "awaiting_consent", "是");
-      return [
-        `系统已为你生成上传码：${existing.participant_code}`,
-        "",
-        "这个上传码用于进入 H5 视频上传页面，请妥善保存。",
-        "如果你确认继续参与，请回复“我同意”。",
-      ].join("\n");
-    }
-
-    if (workflow.test_status === "not_started" || workflow.test_status === "failed") {
-      await setWechatFlowStage(existing.id, "awaiting_test_start", "是");
-      return [
-        `你已完成建档，上传码：${existing.participant_code}`,
-        "",
-        "下一步请回复“开始测试”，进入测试视频页面。",
-      ].join("\n");
-    }
-
-    if (workflow.test_status === "pending") {
-      await setWechatFlowStage(existing.id, "test_ready", "是");
-      return [
-        `你的上传码：${existing.participant_code}`,
-        "",
-        "你的测试视频正在审核中，请耐心等待结果。",
-        "当前无需重复打开页面，等待审核结果即可。",
-      ].join("\n");
-    }
-
-    await setWechatFlowStage(existing.id, "formal_ready", "是");
-    return [
-      `你的上传码：${existing.participant_code}`,
-      "",
-      "你已经进入正式任务阶段。",
-      "请回复“开始”获取正式任务入口。",
-    ].join("\n");
-  }
-
-  const createResult = await createParticipant({
-    wechatOpenid: userOpenid,
-    status: "active",
-    consentConfirmed: false,
-    testStatus: "not_started",
-    formalStatus: "not_started",
-    extra: {
-      wechat_flow_stage: "awaiting_consent",
-      wechat_onboarding_source: "wechat_auto",
-      wechat_onboarding_created_at: new Date().toISOString(),
-    },
-  });
-  console.info("[wechat] handleFirstTimeYes:create_result", {
-    openid: userOpenid,
-    status: createResult.status,
-    detail: createResult.detail ?? null,
-    participantId: createResult.participant?.id ?? null,
-    participantCode: createResult.participant?.participant_code ?? null,
-  });
-
-  if (createResult.status !== "created" || !createResult.participant) {
-    console.error("[wechat] handleFirstTimeYes:create_failed", {
-      openid: userOpenid,
-      status: createResult.status,
-      detail: createResult.detail ?? null,
-    });
-    return "系统暂时无法为你生成上传码，请稍后再试或联系管理员。";
-  }
-
   return [
-    `已为你生成唯一上传码：${createResult.participant.participant_code}`,
-    "",
-    "用途说明：这个上传码用于进入 H5 视频上传页面，请妥善保存。",
-    "参与说明：你需要先提交测试视频，测试视频仅用于审核拍摄质量，不计收益。",
-    "",
-    "如果你已知晓并同意参与，请回复“我同意”。",
+    "【📌流程已更新】",
+    "新用户无需再回复【是】。",
+    "请直接回复【我同意】完成参与确认，然后点击菜单【获取身份码】。",
   ].join("\n");
 }
 
 async function handleFirstTimeNo(userOpenid: string, request: NextRequest): Promise<string> {
   const participant = await findParticipantByOpenId(userOpenid);
   if (!participant) {
-    return [
-      "系统里还没有查到你的老用户记录。",
-      "如果你其实是首次参与，请回复“是”。",
-      "如果确认是老用户，请联系管理员核对账号。",
-      "",
-      `openid：${userOpenid}`,
-    ].join("\n");
+    return buildConsentRequiredReply();
   }
 
-  return buildUploadCodeReplyContent(userOpenid, request);
+  return buildUploadMenuReplyContent(userOpenid, request);
 }
 
 async function handleConsent(userOpenid: string): Promise<string> {
   const participant = await findParticipantByOpenId(userOpenid);
-  if (!participant) {
-    return "系统里还没有你的参与记录。请先回复“是”开始登记。";
+  clearIdentityCodeReplyCache(userOpenid);
+
+  if (participant) {
+    await updateParticipantWorkflow(participant.id, {
+      consent_confirmed: true,
+      test_status: participant.test_status ?? "not_started",
+      formal_status: participant.formal_status ?? "not_started",
+    });
+    await setWechatFlowStage(participant.id, "awaiting_test_start", "我同意");
+    return buildConsentCompletedReply();
   }
 
-  await updateParticipantWorkflow(participant.id, {
-    consent_confirmed: true,
-    test_status: participant.test_status ?? "not_started",
-    formal_status: participant.formal_status ?? "not_started",
+  const createResult = await createParticipant({
+    wechatOpenid: userOpenid,
+    status: "active",
+    consentConfirmed: true,
+    testStatus: "not_started",
+    formalStatus: "not_started",
+    extra: {
+      wechat_flow_stage: "awaiting_test_start",
+      wechat_onboarding_source: "wechat_consent_auto",
+      wechat_onboarding_created_at: new Date().toISOString(),
+      wechat_identity_code_claimed: false,
+    },
   });
-  await setWechatFlowStage(participant.id, "awaiting_test_start", "我同意");
 
-  return [
-    "已记录你的参与确认。",
-    "",
-    "测试视频说明：",
-    "1. 请按页面要求选择场景后上传。",
-    "2. 审核通过后才会进入正式任务。",
-    "",
-    "如果准备好了，请回复“开始测试”。",
-  ].join("\n");
+  const createdParticipant = createResult.participant;
+  if (!createdParticipant) {
+    return "系统暂时无法记录你的参与确认，请稍后再试。";
+  }
+
+  return buildConsentCompletedReply();
 }
 
 async function handleStartTest(userOpenid: string, request: NextRequest): Promise<string> {
@@ -639,11 +682,6 @@ async function handleStartTest(userOpenid: string, request: NextRequest): Promis
 
   return [
     "下面是测试视频上传链接：",
-    "",
-    "苹果手机用户：请确保复制粘贴链接在浏览器上打开。",
-    "【重要】在微信上点击打开将无法上传视频。",
-    "",
-    "安卓手机用户：可直接点击链接并上传视频。",
     "",
     buildH5Link(request, participant.participant_code),
     `身份验证码：${participant.participant_code}`,
@@ -676,8 +714,6 @@ async function handleStartFormal(userOpenid: string, request: NextRequest): Prom
     "",
     "正式任务入口：",
     buildH5Link(request, participant.participant_code),
-    "",
-    ...buildIphoneBrowserNotice(),
   ].join("\n");
 }
 
@@ -787,7 +823,7 @@ export async function POST(request: NextRequest) {
   if (inbound.msgType === "event") {
     const eventName = inbound.event?.trim().toLowerCase() ?? "";
     if (eventName === "click") {
-      const content = await handleWechatMenuClick(inbound.eventKey, userOpenid);
+      const content = await handleWechatMenuClick(inbound.eventKey, userOpenid, request);
       if (content) {
         return xmlResponse(
           buildWechatPassiveTextReply({
@@ -886,7 +922,7 @@ export async function POST(request: NextRequest) {
     } else if (isGuideTextKeyword(normalizedText) || isHelpTextKeyword(normalizedText)) {
       content = buildGuideReplyContent();
     } else if (isIdentityCodeKeyword(normalizedText)) {
-      content = await buildIdentityCodeReplyContent(userOpenid);
+      content = await buildCachedIdentityCodeReplyContent(userOpenid);
     } else if (isManualTextKeyword(normalizedText)) {
       content = buildManualReplyContent();
     } else {

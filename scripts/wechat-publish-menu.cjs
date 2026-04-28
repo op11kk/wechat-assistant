@@ -1,8 +1,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const MENU_GUIDE_KEY = "MENU_GUIDE";
 const MENU_CODE_KEY = "MENU_CODE";
+const MENU_UPLOAD_KEY = "MENU_UPLOAD";
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -81,13 +81,15 @@ async function fetchWechatJson(url, init) {
 }
 
 async function getAccessToken(appId, appSecret) {
-  const query = new URLSearchParams({
-    grant_type: "client_credential",
-    appid: appId,
-    secret: appSecret,
+  const payload = await fetchWechatJson("https://api.weixin.qq.com/cgi-bin/stable_token", {
+    method: "POST",
+    body: JSON.stringify({
+      grant_type: "client_credential",
+      appid: appId,
+      secret: appSecret,
+      force_refresh: false,
+    }),
   });
-
-  const payload = await fetchWechatJson(`https://api.weixin.qq.com/cgi-bin/token?${query.toString()}`);
   if (!payload?.access_token) {
     throw new Error(`Failed to get access token: ${JSON.stringify(payload)}`);
   }
@@ -100,41 +102,23 @@ async function publishMenu() {
   loadEnvFile(path.resolve(process.cwd(), ".env"));
 
   const isDryRun = process.argv.includes("--dry-run");
-  const rawH5EntryUrl =
-    readCliArg("--h5-url") ||
-    process.env.WECHAT_H5_ENTRY_URL?.trim() ||
-    (isDryRun ? "https://example.com/h5" : "");
-
-  if (!rawH5EntryUrl) {
-    throw new Error("Missing required env: WECHAT_H5_ENTRY_URL");
-  }
-
-  const uploadUrl = buildMenuUploadUrl(rawH5EntryUrl);
-
   const menuPayload = {
     button: [
       {
         type: "click",
-        name: "我该做什么",
-        key: MENU_GUIDE_KEY,
-      },
-      {
-        type: "view",
-        name: "上传视频",
-        url: uploadUrl,
+        name: "获取身份码",
+        key: MENU_CODE_KEY,
       },
       {
         type: "click",
-        name: "我的身份码",
-        key: MENU_CODE_KEY,
+        name: "上传",
+        key: MENU_UPLOAD_KEY,
       },
     ],
   };
 
   if (isDryRun) {
     console.log(JSON.stringify(menuPayload, null, 2));
-    console.log("");
-    console.log("提示：菜单里的 view 链接是固定 URL。若要自动携带用户身份码，需要额外接入网页授权。");
     return;
   }
 
@@ -155,8 +139,6 @@ async function publishMenu() {
 
   console.log("Wechat menu published successfully.");
   console.log(JSON.stringify(menuPayload, null, 2));
-  console.log("");
-  console.log("提示：菜单里的 view 链接是固定 URL。若要自动携带用户身份码，需要额外接入网页授权。");
 }
 
 publishMenu().catch((error) => {

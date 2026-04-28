@@ -927,7 +927,23 @@ export default function H5UploadClient() {
               onClick={() => void loadParticipantByCode(participantCodeInput)}
               type="button"
             >
-              {isLookingUp ? "正在验证" : "确认上传码"}
+              <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>
+                <span>确认上传码</span>
+                {isLookingUp ? (
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      animation: "h5LookupSpin 0.75s linear infinite",
+                      border: "2px solid rgba(255, 255, 255, 0.38)",
+                      borderRadius: "999px",
+                      borderTopColor: "#ffffff",
+                      display: "inline-block",
+                      height: 18,
+                      width: 18,
+                    }}
+                  />
+                ) : null}
+              </span>
             </button>
           </div>
           {viewerError ? <p className="field-hint" style={{ marginTop: 14 }}>{viewerError}</p> : null}
@@ -1014,7 +1030,7 @@ export default function H5UploadClient() {
             <div className="progress-stack">
               <div className="status-row">
                 <div className="progress-chip">上传进度 {progress}%</div>
-                <div className="status-chip">{canResumeCurrentFile ? "支持继续上传" : "新上传任务"}</div>
+                {canResumeCurrentFile ? <div className="status-chip">支持继续上传</div> : null}
               </div>
               <div aria-hidden="true" className="progress-track">
                 <div className="progress-fill" style={{ width: `${progress}%` }} />
@@ -1070,6 +1086,16 @@ export default function H5UploadClient() {
           </pre>
         </details>
       </section>
+      <style jsx>{`
+        @keyframes h5LookupSpin {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      `}</style>
     </main>
   );
 }
