@@ -47,6 +47,11 @@ type PartPresignResponse = {
   headers?: Record<string, string>;
 };
 
+type BatchPartPresignResponse = {
+  session_id: string;
+  parts: PartPresignResponse[];
+};
+
 type StoredMultipartSession = {
   sessionId: string;
   participantCode: string;
@@ -195,7 +200,17 @@ function isMobileUploadEnvironment(): boolean {
 }
 
 function getUploadConcurrency(pendingPartCount: number): number {
-  const maxConcurrency = isMobileUploadEnvironment() ? 1 : DEFAULT_MULTIPART_CONCURRENCY;
+  const connection = getNetworkInformation();
+  const effectiveType = connection?.effectiveType?.toLowerCase() ?? "";
+  const downlinkMbps = connection?.downlink;
+
+  let maxConcurrency = DEFAULT_MULTIPART_CONCURRENCY;
+  if (connection?.saveData || effectiveType === "slow-2g" || effectiveType === "2g") {
+    maxConcurrency = 1;
+  } else if (isMobileUploadEnvironment()) {
+    maxConcurrency = effectiveType === "3g" || (downlinkMbps !== undefined && downlinkMbps < 2) ? 1 : 2;
+  }
+
   return Math.min(maxConcurrency, Math.max(pendingPartCount, 1));
 }
 
@@ -444,6 +459,41 @@ function getPartBytes(fileSize: number, partSize: number, partNumber: number): n
   const start = (partNumber - 1) * partSize;
   const end = Math.min(start + partSize, fileSize);
   return Math.max(end - start, 0);
+}
+
+async function fetchPresignedPart(sessionId: string, partNumber: number): Promise<PartPresignResponse> {
+  return fetchJson<PartPresignResponse>("/upload/multipart/part", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      part_number: partNumber,
+    }),
+  });
+}
+
+async function fetchPresignedPartMap(
+  sessionId: string,
+  partNumbers: number[],
+): Promise<Map<number, PartPresignResponse>> {
+  if (partNumbers.length === 0) {
+    return new Map();
+  }
+
+  const response = await fetchJson<BatchPartPresignResponse>("/upload/multipart/part", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      part_numbers: partNumbers,
+    }),
+  });
+
+  return new Map(response.parts.map((part) => [part.part_number, part]));
 }
 
 function uploadPartWithProgress(
@@ -850,6 +900,46 @@ export default function H5UploadClient() {
 
       const concurrency = getUploadConcurrency(pendingPartNumbers.length);
       const queue = [...pendingPartNumbers];
+      const presignedPartMap = await fetchPresignedPartMap(sessionState.session_id, pendingPartNumbers);
+      const persistBatchSize = Math.max(2, Math.min(concurrency, 3));
+      const pendingPersistedParts = new Map<number, string>();
+      let persistSequence: Promise<void> = Promise.resolve();
+
+      const flushUploadedParts = async (force = false) => {
+        if (pendingPersistedParts.size === 0) {
+          return;
+        }
+        if (!force && pendingPersistedParts.size < persistBatchSize) {
+          return;
+        }
+
+        const batch = Array.from(pendingPersistedParts.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([part_number, etag]) => ({ part_number, etag }));
+        pendingPersistedParts.clear();
+
+        const task = persistSequence.then(async () => {
+          await fetchJson("/upload/multipart/part", {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              session_id: sessionState.session_id,
+              parts: batch,
+            }),
+          });
+
+          sessionSnapshot = {
+            ...sessionSnapshot,
+            updatedAt: new Date().toISOString(),
+          };
+          syncStoredSession(sessionSnapshot);
+        });
+
+        persistSequence = task.catch(() => undefined);
+        await task;
+      };
 
       const uploadSinglePart = async (partNumber: number) => {
         const blob = slicePart(selectedFile, sessionState.part_size, partNumber);
@@ -857,45 +947,26 @@ export default function H5UploadClient() {
 
         for (let attempt = 1; attempt <= MAX_RETRIES_PER_PART; attempt += 1) {
           try {
-            const presign = await fetchJson<PartPresignResponse>("/upload/multipart/part", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                session_id: sessionState.session_id,
-                part_number: partNumber,
-              }),
-            });
+            const presign = attempt === 1 ? presignedPartMap.get(partNumber) ?? null : null;
+            const resolvedPresign = presign ?? (await fetchPresignedPart(sessionState.session_id, partNumber));
 
             progressByPart.set(partNumber, 0);
             updateOverallProgress();
 
-            const etag = await uploadPartWithProgress(presign.url, blob, presign.headers ?? {}, (loadedBytes) => {
-              progressByPart.set(partNumber, loadedBytes);
-              updateOverallProgress();
-            });
+            const etag = await uploadPartWithProgress(
+              resolvedPresign.url,
+              blob,
+              resolvedPresign.headers ?? {},
+              (loadedBytes) => {
+                progressByPart.set(partNumber, loadedBytes);
+                updateOverallProgress();
+              },
+            );
 
             progressByPart.delete(partNumber);
             uploadedParts.set(partNumber, etag);
-
-            await fetchJson("/upload/multipart/part", {
-              method: "PATCH",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                session_id: sessionState.session_id,
-                part_number: partNumber,
-                etag,
-              }),
-            });
-
-            sessionSnapshot = {
-              ...sessionSnapshot,
-              updatedAt: new Date().toISOString(),
-            };
-            syncStoredSession(sessionSnapshot);
+            pendingPersistedParts.set(partNumber, etag);
+            await flushUploadedParts(queue.length === 0);
             updateOverallProgress();
             return;
           } catch (error) {
