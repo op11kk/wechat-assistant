@@ -5,6 +5,7 @@ import { parseSubmissionMeta } from "@/lib/h5-workflow";
 import { corsPreflightResponse, jsonResponse, withCorsHeaders } from "@/lib/http";
 import { completeMultipartUpload } from "@/lib/r2";
 import { getUploadSessionById, updateUploadSessionStatus, updateUploadSessionUploadedParts } from "@/lib/upload-sessions";
+import { enqueueVideoAnalysisJob } from "@/lib/video-analysis";
 import {
   decorateSubmissionObjectUrl,
   findExistingSubmissionForDedup,
@@ -151,6 +152,10 @@ export async function POST(request: NextRequest) {
         sessionId,
         status: "completed",
         completedAt: new Date().toISOString(),
+      });
+      await enqueueVideoAnalysisJob({
+        submissionId: insertResult.submission.id,
+        objectKey: insertResult.submission.object_key,
       });
 
       await syncParticipantWorkflowAfterUpload({

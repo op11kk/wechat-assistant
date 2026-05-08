@@ -105,6 +105,26 @@ export function buildWechatPassiveTextReply(params: {
   return `<xml><ToUserName><![CDATA[${params.toUserOpenid}]]></ToUserName><FromUserName><![CDATA[${params.fromOfficialUserName}]]></FromUserName><CreateTime>${createTime}</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${params.content}]]></Content></xml>`;
 }
 
+export function buildWechatPassiveImageReply(params: {
+  toUserOpenid: string;
+  fromOfficialUserName: string;
+  mediaId: string;
+}): string {
+  const createTime = Math.floor(Date.now() / 1000);
+  return `<xml><ToUserName><![CDATA[${params.toUserOpenid}]]></ToUserName><FromUserName><![CDATA[${params.fromOfficialUserName}]]></FromUserName><CreateTime>${createTime}</CreateTime><MsgType><![CDATA[image]]></MsgType><Image><MediaId><![CDATA[${params.mediaId}]]></MediaId></Image></xml>`;
+}
+
+export function buildWechatPassiveVideoReply(params: {
+  toUserOpenid: string;
+  fromOfficialUserName: string;
+  mediaId: string;
+  title?: string;
+  description?: string;
+}): string {
+  const createTime = Math.floor(Date.now() / 1000);
+  return `<xml><ToUserName><![CDATA[${params.toUserOpenid}]]></ToUserName><FromUserName><![CDATA[${params.fromOfficialUserName}]]></FromUserName><CreateTime>${createTime}</CreateTime><MsgType><![CDATA[video]]></MsgType><Video><MediaId><![CDATA[${params.mediaId}]]></MediaId><Title><![CDATA[${params.title ?? ""}]]></Title><Description><![CDATA[${params.description ?? ""}]]></Description></Video></xml>`;
+}
+
 export async function getWechatAccessToken(): Promise<string | null> {
   if (!hasWechatMediaConfig()) {
     return null;

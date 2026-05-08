@@ -1,6 +1,7 @@
 import type { PoolClient, QueryResultRow } from "pg";
 
 import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
+import { enqueueVideoAnalysisJob, type VideoAnalysisDecision, type VideoAnalysisStatus } from "@/lib/video-analysis";
 import { dbQuery, dbQueryMaybeOne, dbQueryOne, withDbTransaction } from "@/lib/db";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
@@ -60,6 +61,13 @@ export type VideoSubmissionRow = {
   review_status: "pending" | "approved" | "rejected";
   reject_reason: string | null;
   reviewed_at: string | null;
+  analysis_status: VideoAnalysisStatus;
+  analysis_decision: VideoAnalysisDecision | null;
+  analysis_ratio: number | null;
+  analysis_summary: string | null;
+  analysis_payload: Record<string, unknown>;
+  analysis_started_at: string | null;
+  analysis_completed_at: string | null;
   created_at: string;
 };
 
@@ -121,6 +129,13 @@ function parseNullableNumber(value: unknown): number | null {
   }
   const parsed = Number.parseFloat(String(value));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeJsonObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
 }
 
 function formatParticipantCode(value: number): string {
@@ -188,6 +203,13 @@ function mapVideoSubmissionRow(row: QueryResultRow): VideoSubmissionRow {
     review_status: String(row.review_status) as VideoSubmissionRow["review_status"],
     reject_reason: row.reject_reason ? String(row.reject_reason) : null,
     reviewed_at: row.reviewed_at ? String(row.reviewed_at) : null,
+    analysis_status: String(row.analysis_status ?? "pending") as VideoAnalysisStatus,
+    analysis_decision: row.analysis_decision ? String(row.analysis_decision) as VideoAnalysisDecision : null,
+    analysis_ratio: parseNullableNumber(row.analysis_ratio),
+    analysis_summary: row.analysis_summary ? String(row.analysis_summary) : null,
+    analysis_payload: normalizeJsonObject(row.analysis_payload),
+    analysis_started_at: row.analysis_started_at ? String(row.analysis_started_at) : null,
+    analysis_completed_at: row.analysis_completed_at ? String(row.analysis_completed_at) : null,
     created_at: String(row.created_at),
   };
 }
@@ -796,6 +818,10 @@ export async function syncWechatMediaToR2(
     objectKey,
     sizeBytes: download.body.length,
     mime: download.contentType,
+  });
+  await enqueueVideoAnalysisJob({
+    submissionId,
+    objectKey,
   });
   console.info("wechat media sync completed", {
     submissionId,

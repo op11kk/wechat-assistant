@@ -3,6 +3,8 @@ const path = require("node:path");
 
 const MENU_CODE_KEY = "MENU_CODE";
 const MENU_UPLOAD_KEY = "MENU_UPLOAD";
+const MENU_GROUP_KEY = "MENU_GROUP";
+const MENU_CONTACT_KEY = "MENU_CONTACT_SERVICE";
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -44,18 +46,6 @@ function requireEnv(name) {
   return value;
 }
 
-function readCliArg(name) {
-  const prefix = `${name}=`;
-  const matched = process.argv.find((arg) => arg.startsWith(prefix));
-  return matched ? matched.slice(prefix.length).trim() : "";
-}
-
-function buildMenuUploadUrl(rawUrl) {
-  const url = new URL(rawUrl);
-  url.searchParams.set("from", "menu");
-  return url.toString();
-}
-
 async function fetchWechatJson(url, init) {
   const response = await fetch(url, {
     ...init,
@@ -74,22 +64,30 @@ async function fetchWechatJson(url, init) {
   }
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${typeof payload === "string" ? payload : JSON.stringify(payload)}`);
+    throw new Error(
+      `HTTP ${response.status}: ${
+        typeof payload === "string" ? payload : JSON.stringify(payload)
+      }`,
+    );
   }
 
   return payload;
 }
 
 async function getAccessToken(appId, appSecret) {
-  const payload = await fetchWechatJson("https://api.weixin.qq.com/cgi-bin/stable_token", {
-    method: "POST",
-    body: JSON.stringify({
-      grant_type: "client_credential",
-      appid: appId,
-      secret: appSecret,
-      force_refresh: false,
-    }),
-  });
+  const payload = await fetchWechatJson(
+    "https://api.weixin.qq.com/cgi-bin/stable_token",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        grant_type: "client_credential",
+        appid: appId,
+        secret: appSecret,
+        force_refresh: false,
+      }),
+    },
+  );
+
   if (!payload?.access_token) {
     throw new Error(`Failed to get access token: ${JSON.stringify(payload)}`);
   }
@@ -111,8 +109,38 @@ async function publishMenu() {
       },
       {
         type: "click",
-        name: "上传",
+        name: "上传视频",
         key: MENU_UPLOAD_KEY,
+      },
+      {
+        name: "其他",
+        sub_button: [
+          {
+            type: "click",
+            name: "加入社群",
+            key: MENU_GROUP_KEY,
+          },
+          {
+            type: "view",
+            name: "项目介绍",
+            url: "https://mp.weixin.qq.com/s/kU8HnmvMPWDnVwfxBDQPwA",
+          },
+          {
+            type: "view",
+            name: "拍摄标准",
+            url: "https://mp.weixin.qq.com/s/OY0OAR5PYFulOmNuXMvu6g",
+          },
+          {
+            type: "view",
+            name: "结算规则",
+            url: "https://mp.weixin.qq.com/s/FtzGNFfrS3PUWbo2HAswfA",
+          },
+          {
+            type: "click",
+            name: "联系客服",
+            key: MENU_CONTACT_KEY,
+          },
+        ],
       },
     ],
   };

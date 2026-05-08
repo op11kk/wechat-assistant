@@ -109,3 +109,39 @@ COMMENT ON TABLE public.participants IS 'Registered WeChat participants and thei
 COMMENT ON TABLE public.video_submissions IS 'Chat and H5 video submissions stored in COS or R2.';
 COMMENT ON TABLE public.upload_sessions IS 'Multipart H5 upload sessions before video_submissions rows are finalized.';
 COMMENT ON TABLE public.participant_referral_bind_logs IS 'Immutable logs for H5 team leader promo code bindings.';
+
+ALTER TABLE public.video_submissions
+  ADD COLUMN IF NOT EXISTS analysis_status TEXT NOT NULL DEFAULT 'pending',
+  ADD COLUMN IF NOT EXISTS analysis_decision TEXT,
+  ADD COLUMN IF NOT EXISTS analysis_ratio NUMERIC,
+  ADD COLUMN IF NOT EXISTS analysis_summary TEXT,
+  ADD COLUMN IF NOT EXISTS analysis_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS analysis_started_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS analysis_completed_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS public.video_analysis_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  submission_id BIGINT NOT NULL REFERENCES public.video_submissions (id) ON DELETE CASCADE,
+  object_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  last_error TEXT,
+  result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT video_analysis_jobs_status_chk CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
+  CONSTRAINT video_analysis_jobs_attempts_chk CHECK (attempts >= 0),
+  CONSTRAINT ux_video_analysis_jobs_submission UNIQUE (submission_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_submissions_analysis_status
+  ON public.video_submissions (analysis_status);
+CREATE INDEX IF NOT EXISTS idx_video_analysis_jobs_status
+  ON public.video_analysis_jobs (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_video_analysis_jobs_submission_id
+  ON public.video_analysis_jobs (submission_id);
+
+COMMENT ON TABLE public.video_analysis_jobs IS 'Background job queue for automatic video quality analysis.';
