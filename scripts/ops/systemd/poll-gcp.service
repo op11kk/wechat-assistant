@@ -1,0 +1,23 @@
+[Unit]
+Description=Wechat Assistant GCP OpenAI batch poll worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__WORKDIR__/.env.local
+Environment=APP_ENV=production
+Environment=DEPLOY_TARGET=gcp
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/npm run worker:openai-video-batch-poll
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

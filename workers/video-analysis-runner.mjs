@@ -8,6 +8,8 @@ import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import pg from "pg";
 
+import { logWorkerRuntimeShutdown, logWorkerRuntimeStarted } from "./_runtime.mjs";
+
 const { Pool } = pg;
 
 const env = {
@@ -52,6 +54,8 @@ const minWindowHitRatio = parseBoundedNumber(env.VIDEO_ANALYSIS_MIN_WINDOW_HIT_R
 const passRatio = parseBoundedNumber(env.VIDEO_ANALYSIS_PASS_RATIO, 0.8, 0.5, 1);
 const reviewRatio = parseBoundedNumber(env.VIDEO_ANALYSIS_REVIEW_RATIO, 0.7, 0.3, 1);
 const analysisTimeoutMs = parseBoundedInteger(env.VIDEO_ANALYSIS_TIMEOUT_MS, 20 * 60 * 1000, 30_000, 60 * 60 * 1000);
+const workerRole = "legacy-video-analysis";
+const workerEntry = "workers/video-analysis-runner.mjs";
 
 if (!env.DATABASE_URL) {
   throw new Error("Missing DATABASE_URL");
@@ -88,7 +92,10 @@ function parseBoundedNumber(raw, fallback, min, max) {
 }
 
 function parseAnalysisProvider(raw) {
-  return raw === "gemini" ? "gemini" : "mediapipe";
+  if (raw === "gemini" || raw === "hybrid") {
+    return raw;
+  }
+  return "mediapipe";
 }
 
 function getStorageProvider() {
@@ -395,6 +402,16 @@ async function processJob(job) {
 }
 
 async function runLoop() {
+  logWorkerRuntimeStarted({
+    role: workerRole,
+    entry: workerEntry,
+    workerId,
+    extra: {
+      provider,
+      analysisProvider,
+      pollIntervalMs,
+    },
+  });
   console.info("video analysis worker started", {
     workerId,
     provider,
@@ -430,6 +447,12 @@ function shutdown(signal) {
     return;
   }
   shuttingDown = true;
+  logWorkerRuntimeShutdown({
+    role: workerRole,
+    entry: workerEntry,
+    workerId,
+    extra: { signal },
+  });
   console.info("video analysis worker shutting down", { workerId, signal });
 }
 

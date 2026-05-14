@@ -69,7 +69,10 @@ async function waitForTerminalState(submissionId: number, waitTimeoutSeconds: nu
     const state = await getCurrentState(submissionId);
     const terminal =
       state.job &&
-      (state.job.status === "succeeded" || state.job.status === "failed");
+      (state.job.status === "completed" ||
+        state.job.status === "failed_terminal" ||
+        state.job.status === "succeeded" ||
+        state.job.status === "failed");
 
     if (terminal) {
       return {
@@ -154,9 +157,20 @@ export async function POST(request: NextRequest) {
       objectKey: submission.object_key,
     });
     action = "enqueued";
-  } else if (existingJob.status === "running") {
+  } else if (
+    existingJob.status === "preprocessing" ||
+    existingJob.status === "submit_pending" ||
+    existingJob.status === "submitted" ||
+    existingJob.status === "polling" ||
+    existingJob.status === "running"
+  ) {
     action = "already_running";
-  } else if (existingJob.status === "pending") {
+  } else if (
+    existingJob.status === "queued" ||
+    existingJob.status === "preprocess_ready" ||
+    existingJob.status === "retry_pending" ||
+    existingJob.status === "pending"
+  ) {
     action = "already_pending";
   } else {
     currentJob = await requeueVideoAnalysisJobBySubmissionId(submissionId);

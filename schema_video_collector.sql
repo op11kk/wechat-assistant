@@ -117,7 +117,48 @@ ALTER TABLE public.video_submissions
   ADD COLUMN IF NOT EXISTS analysis_summary TEXT,
   ADD COLUMN IF NOT EXISTS analysis_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS analysis_started_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS analysis_completed_at TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS analysis_completed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS raw_cos_bucket TEXT,
+  ADD COLUMN IF NOT EXISTS raw_cos_key TEXT,
+  ADD COLUMN IF NOT EXISTS raw_cos_region TEXT,
+  ADD COLUMN IF NOT EXISTS preprocess_version INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS contact_sheet_manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS contact_sheet_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS openai_batch_id TEXT,
+  ADD COLUMN IF NOT EXISTS openai_custom_id TEXT,
+  ADD COLUMN IF NOT EXISTS submit_attempt INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS poll_attempt INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_error TEXT,
+  ADD COLUMN IF NOT EXISTS lease_owner TEXT,
+  ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_video_submissions_analysis_status_lease
+  ON public.video_submissions (analysis_status, lease_expires_at, id);
+
+CREATE TABLE IF NOT EXISTS public.video_submission_artifacts (
+  id BIGSERIAL PRIMARY KEY,
+  submission_id BIGINT NOT NULL REFERENCES public.video_submissions (id) ON DELETE CASCADE,
+  preprocess_version INTEGER NOT NULL,
+  artifact_type TEXT NOT NULL DEFAULT 'contact_sheet',
+  bucket TEXT,
+  region TEXT,
+  object_key TEXT NOT NULL,
+  sha256 TEXT,
+  width INTEGER,
+  height INTEGER,
+  size_bytes BIGINT,
+  segment_index INTEGER NOT NULL DEFAULT 0,
+  time_points_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT video_submission_artifacts_type_chk CHECK (artifact_type IN ('contact_sheet', 'manifest')),
+  CONSTRAINT video_submission_artifacts_segment_chk CHECK (segment_index >= 0),
+  CONSTRAINT ux_video_submission_artifacts_version_segment UNIQUE (submission_id, preprocess_version, artifact_type, segment_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_submission_artifacts_submission_id
+  ON public.video_submission_artifacts (submission_id, preprocess_version, segment_index);
 
 CREATE TABLE IF NOT EXISTS public.video_analysis_jobs (
   id BIGSERIAL PRIMARY KEY,
@@ -145,3 +186,4 @@ CREATE INDEX IF NOT EXISTS idx_video_analysis_jobs_submission_id
   ON public.video_analysis_jobs (submission_id);
 
 COMMENT ON TABLE public.video_analysis_jobs IS 'Background job queue for automatic video quality analysis.';
+COMMENT ON TABLE public.video_submission_artifacts IS 'Deterministic preprocess outputs such as contact sheets used by OpenAI Batch review.';

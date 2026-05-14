@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import pg from "pg";
 
+import { logWorkerRuntimeStarted } from "./_runtime.mjs";
+
 const { Pool } = pg;
 
 const env = {
@@ -22,6 +24,7 @@ const env = {
 const WECHAT_TOKEN_TIMEOUT_MS = 10_000;
 const WECHAT_MEDIA_TIMEOUT_MS = 120_000;
 const COS_UPLOAD_TIMEOUT_MS = 120_000;
+const workerId = `wechat-media:${randomUUID().slice(0, 8)}`;
 
 let tokenCache = {
   token: null,
@@ -325,6 +328,14 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(Number.parseInt(env.PORT, 10), () => {
+  logWorkerRuntimeStarted({
+    role: "wechat-media",
+    entry: "workers/wechat-media-worker.mjs",
+    workerId,
+    extra: {
+      port: env.PORT,
+    },
+  });
   console.info("wechat media worker listening", {
     port: env.PORT,
   });

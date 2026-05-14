@@ -1,10 +1,12 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -22,6 +24,11 @@ MODEL_URL = (
 DOWNLOAD_RETRIES = 3
 DOWNLOAD_TIMEOUT_SECONDS = 120
 DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+DEFAULT_DOWNLOAD_RETRIES = int(float(os.getenv("VIDEO_ANALYSIS_DOWNLOAD_RETRIES", str(DOWNLOAD_RETRIES)) or DOWNLOAD_RETRIES))
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = int(
+    float(os.getenv("VIDEO_ANALYSIS_DOWNLOAD_TIMEOUT_SECONDS", str(DOWNLOAD_TIMEOUT_SECONDS)) or DOWNLOAD_TIMEOUT_SECONDS)
+)
+DEFAULT_DOWNLOAD_CHUNK_SIZE_MB = float(os.getenv("VIDEO_ANALYSIS_DOWNLOAD_CHUNK_SIZE_MB", "8") or 8)
 DEFAULT_PROVIDER = os.getenv("VIDEO_ANALYSIS_PROVIDER", "mediapipe").strip().lower() or "mediapipe"
 DEFAULT_GEMINI_MODEL = os.getenv("VIDEO_ANALYSIS_GEMINI_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
 DEFAULT_GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "").strip()
@@ -29,6 +36,11 @@ DEFAULT_GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1").strip() or "us-c
 DEFAULT_GCS_BUCKET = os.getenv("GCS_VIDEO_REVIEW_BUCKET", "").strip()
 DEFAULT_SEGMENT_SECONDS = int(float(os.getenv("VIDEO_ANALYSIS_SEGMENT_SECONDS", "6") or 6))
 DEFAULT_SEGMENT_OVERLAP_SECONDS = int(float(os.getenv("VIDEO_ANALYSIS_SEGMENT_OVERLAP_SECONDS", "2") or 2))
+DEFAULT_GEMINI_CONCURRENCY = int(float(os.getenv("VIDEO_ANALYSIS_GEMINI_CONCURRENCY", "3") or 3))
+DEFAULT_GEMINI_SEGMENT_RETRIES = int(float(os.getenv("VIDEO_ANALYSIS_GEMINI_SEGMENT_RETRIES", "2") or 2))
+DEFAULT_GEMINI_FALLBACK_TO_MEDIAPIPE = (
+    os.getenv("VIDEO_ANALYSIS_GEMINI_FALLBACK_TO_MEDIAPIPE", "1").strip().lower() not in {"0", "false", "no"}
+)
 DEFAULT_GCS_PREFIX = os.getenv("VIDEO_ANALYSIS_GCS_PREFIX", "video-review-clips").strip() or "video-review-clips"
 
 
@@ -47,10 +59,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default=DEFAULT_PROVIDER,
-        choices=("mediapipe", "gemini"),
+        choices=("mediapipe", "gemini", "hybrid"),
         help="Video analysis backend",
     )
     return parser.parse_args()
+
+
+def log_stderr(message: str, **fields) -> None:
+    if fields:
+        serialized = ", ".join(f"{key}={fields[key]}" for key in sorted(fields))
+        print(f"[video-analysis] {message} | {serialized}", file=sys.stderr, flush=True)
+        return
+    print(f"[video-analysis] {message}", file=sys.stderr, flush=True)
 
 
 def ensure_model() -> Path:
@@ -63,45 +83,75 @@ def ensure_model() -> Path:
 
 
 def _download_once(url: str, destination: Path) -> None:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "wechat-assistant-video-qc/1.0",
-            "Accept": "*/*",
-            "Connection": "close",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+    resume_from = destination.stat().st_size if destination.exists() else 0
+    chunk_size = max(256 * 1024, int(DEFAULT_DOWNLOAD_CHUNK_SIZE_MB * 1024 * 1024))
+    headers = {
+        "User-Agent": "wechat-assistant-video-qc/1.0",
+        "Accept": "*/*",
+        "Connection": "close",
+    }
+    if resume_from > 0:
+        headers["Range"] = f"bytes={resume_from}-"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS) as response:
         expected_length_header = response.headers.get("Content-Length")
+        content_range_header = response.headers.get("Content-Range")
         expected_length = int(expected_length_header) if expected_length_header else None
-        bytes_written = 0
+        expected_total_length = None
+        write_mode = "ab" if resume_from > 0 else "wb"
 
-        with destination.open("wb") as output_file:
+        if content_range_header:
+            _, _, total_length = content_range_header.partition("/")
+            if total_length.isdigit():
+                expected_total_length = int(total_length)
+        elif expected_length is not None:
+            expected_total_length = resume_from + expected_length if resume_from > 0 else expected_length
+
+        if resume_from > 0 and not content_range_header:
+            write_mode = "wb"
+            resume_from = 0
+            expected_total_length = expected_length
+
+        bytes_written = resume_from
+
+        with destination.open(write_mode) as output_file:
             while True:
-                chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                chunk = response.read(chunk_size)
                 if not chunk:
                     break
                 output_file.write(chunk)
                 bytes_written += len(chunk)
 
-        if expected_length is not None and bytes_written != expected_length:
+        if expected_total_length is not None and bytes_written != expected_total_length:
             raise urllib.error.ContentTooShortError(
-                f"retrieval incomplete: got only {bytes_written} out of {expected_length} bytes",
+                f"retrieval incomplete: got only {bytes_written} out of {expected_total_length} bytes",
                 None,
             )
 
 
 def download_video(url: str) -> Path:
     last_error: Exception | None = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        temp_path = Path(temp_file.name)
 
-    for attempt in range(1, DOWNLOAD_RETRIES + 1):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
-            temp_path = Path(temp_file.name)
-
+    retries = max(1, DEFAULT_DOWNLOAD_RETRIES)
+    log_stderr(
+        "source video download started",
+        retries=retries,
+        timeout_seconds=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+        chunk_size_mb=DEFAULT_DOWNLOAD_CHUNK_SIZE_MB,
+    )
+    for attempt in range(1, retries + 1):
         try:
+            log_stderr(
+                "source video download attempt",
+                attempt=attempt,
+                resume_from_bytes=temp_path.stat().st_size if temp_path.exists() else 0,
+            )
             _download_once(url, temp_path)
             if temp_path.stat().st_size <= 0:
                 raise RuntimeError("downloaded video is empty")
+            log_stderr("source video download completed", size_bytes=temp_path.stat().st_size)
             return temp_path
         except (
             urllib.error.ContentTooShortError,
@@ -112,15 +162,20 @@ def download_video(url: str) -> Path:
             RuntimeError,
         ) as error:
             last_error = error
-            temp_path.unlink(missing_ok=True)
-            if attempt >= DOWNLOAD_RETRIES:
+            log_stderr(
+                "source video download retry scheduled",
+                attempt=attempt,
+                error=str(error),
+            )
+            if attempt >= retries:
                 break
-            time.sleep(min(2**attempt, 5))
+            time.sleep(min(2**attempt, 15))
 
+    temp_path.unlink(missing_ok=True)
     if last_error is None:
         raise RuntimeError("video download failed for an unknown reason")
     raise RuntimeError(
-        f"video download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
+        f"video download failed after {retries} attempts: {last_error}"
     ) from last_error
 
 
@@ -379,6 +434,14 @@ def create_gcs_client(project_id: str):
     return storage.Client(project=project_id)
 
 
+def read_bounded_positive_int(raw_value: str, fallback: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(float(raw_value))
+    except (TypeError, ValueError):
+        return fallback
+    return max(minimum, min(maximum, parsed))
+
+
 def upload_segment(bucket, prefix: str, segment: dict) -> str:
     remote_name = (
         f"{prefix}/segment_{segment['index']:04d}_{uuid4().hex}.mp4"
@@ -602,6 +665,56 @@ def review_segment_with_gemini(client, model_name: str, gcs_uri: str, segment: d
     }
 
 
+def review_segment_via_gemini(
+    project_id: str,
+    location: str,
+    bucket_name: str,
+    prefix: str,
+    model_name: str,
+    segment: dict,
+) -> tuple[dict, str]:
+    retries = max(1, DEFAULT_GEMINI_SEGMENT_RETRIES)
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        storage_client = create_gcs_client(project_id)
+        bucket = storage_client.bucket(bucket_name)
+        client = create_gemini_client(project_id, location)
+        try:
+            log_stderr("gemini segment attempt", attempt=attempt, segment_index=segment["index"])
+            gcs_uri = upload_segment(bucket, prefix, segment)
+            result = review_segment_with_gemini(client, model_name, gcs_uri, segment)
+            return result, gcs_uri.removeprefix(f"gs://{bucket_name}/")
+        except Exception as error:
+            last_error = error
+            log_stderr(
+                "gemini segment retry scheduled",
+                attempt=attempt,
+                segment_index=segment["index"],
+                error=str(error),
+            )
+            if attempt >= retries:
+                break
+            time.sleep(min(2**attempt, 10))
+    if last_error is None:
+        raise RuntimeError(f"Gemini segment {segment['index']} failed for an unknown reason")
+    raise last_error
+
+
+def attach_pipeline_metadata(result: dict, *, requested_provider: str, executed_provider: str, **extra) -> dict:
+    enriched = dict(result)
+    pipeline = dict(enriched.get("pipeline", {}))
+    pipeline.update(
+        {
+            "requested_provider": requested_provider,
+            "executed_provider": executed_provider,
+        }
+    )
+    for key, value in extra.items():
+        pipeline[key] = value
+    enriched["pipeline"] = pipeline
+    return enriched
+
+
 def summarize_gemini_results(segment_results: list[dict], pass_ratio: float, review_ratio: float) -> dict:
     if not segment_results:
         raise RuntimeError("Gemini produced no segment results")
@@ -720,28 +833,47 @@ def analyze_video_gemini(
     )
     if overlap_seconds >= segment_seconds:
         overlap_seconds = max(segment_seconds - 1, 0)
+    gemini_concurrency = read_bounded_positive_int(
+        os.getenv("VIDEO_ANALYSIS_GEMINI_CONCURRENCY", str(DEFAULT_GEMINI_CONCURRENCY)),
+        fallback=DEFAULT_GEMINI_CONCURRENCY,
+        minimum=1,
+        maximum=8,
+    )
 
     metadata, segments, segments_dir = segment_video(video_path, segment_seconds, overlap_seconds)
     storage_client = create_gcs_client(project_id)
     bucket = storage_client.bucket(bucket_name)
     prefix = f"{DEFAULT_GCS_PREFIX}/{uuid4().hex}"
     uploaded_object_names: list[str] = []
-    client = create_gemini_client(project_id, location)
     segment_results: list[dict] = []
     effective_pass_ratio = max(pass_ratio, 0.70)
     effective_review_ratio = min(review_ratio, effective_pass_ratio)
 
     try:
-        for segment in segments:
-            gcs_uri = upload_segment(bucket, prefix, segment)
-            uploaded_object_names.append(gcs_uri.removeprefix(f"gs://{bucket_name}/"))
-            segment_results.append(review_segment_with_gemini(client, model_name, gcs_uri, segment))
+        with ThreadPoolExecutor(max_workers=min(gemini_concurrency, len(segments))) as executor:
+            futures = [
+                executor.submit(
+                    review_segment_via_gemini,
+                    project_id,
+                    location,
+                    bucket_name,
+                    prefix,
+                    model_name,
+                    segment,
+                )
+                for segment in segments
+            ]
+            for future in as_completed(futures):
+                segment_result, object_name = future.result()
+                uploaded_object_names.append(object_name)
+                segment_results.append(segment_result)
     finally:
         cleanup_gcs_objects(bucket, uploaded_object_names)
         shutil.rmtree(segments_dir, ignore_errors=True)
 
+    segment_results.sort(key=lambda item: item["segment_index"])
     audit = summarize_gemini_results(segment_results, effective_pass_ratio, effective_review_ratio)
-    return {
+    return attach_pipeline_metadata({
         "ok": True,
         "provider": "gemini",
         "decision": audit["final_decision"],
@@ -755,6 +887,7 @@ def analyze_video_gemini(
             "model": model_name,
             "segment_seconds": segment_seconds,
             "segment_overlap_seconds": overlap_seconds,
+            "concurrency": gemini_concurrency,
         },
         "audit": {
             "total_duration_seconds": audit["total_duration_seconds"],
@@ -774,21 +907,17 @@ def analyze_video_gemini(
             "qualified_duration_seconds": audit["qualified_duration_seconds"],
             "bimanual_visibility_rate_percent": audit["bimanual_visibility_rate_percent"],
         },
-    }
+    }, requested_provider="gemini", executed_provider="gemini")
 
 
-def analyze_video(provider: str, video_path: Path, args: argparse.Namespace) -> dict:
-    if provider == "gemini":
-        return analyze_video_gemini(
-            video_path=video_path,
-            pass_ratio=args.pass_ratio,
-            review_ratio=args.review_ratio,
-        )
-
+def analyze_video_hybrid(
+    video_path: Path,
+    args: argparse.Namespace,
+) -> dict:
     model_path = ensure_model()
     detector = create_detector(model_path)
     try:
-        return analyze_video_mediapipe(
+        mediapipe_result = analyze_video_mediapipe(
             video_path=video_path,
             detector=detector,
             sample_fps=args.sample_fps,
@@ -796,6 +925,81 @@ def analyze_video(provider: str, video_path: Path, args: argparse.Namespace) -> 
             pass_ratio=args.pass_ratio,
             review_ratio=args.review_ratio,
         )
+    finally:
+        detector.close()
+
+    mediapipe_result = attach_pipeline_metadata(
+        mediapipe_result,
+        requested_provider="hybrid",
+        executed_provider="mediapipe",
+        mediapipe_decision=mediapipe_result.get("decision"),
+    )
+
+    if mediapipe_result.get("decision") != "review_needed":
+        return mediapipe_result
+
+    log_stderr("hybrid escalation to gemini", mediapipe_decision=mediapipe_result.get("decision"))
+    try:
+        gemini_result = analyze_video_gemini(
+            video_path=video_path,
+            pass_ratio=args.pass_ratio,
+            review_ratio=args.review_ratio,
+        )
+        return attach_pipeline_metadata(
+            gemini_result,
+            requested_provider="hybrid",
+            executed_provider="gemini",
+            mediapipe_decision=mediapipe_result.get("decision"),
+            fallback_used=False,
+        )
+    except Exception as error:
+        if not DEFAULT_GEMINI_FALLBACK_TO_MEDIAPIPE:
+            raise
+        fallback_reason = str(error)
+        log_stderr("hybrid fallback to mediapipe", error=fallback_reason)
+        fallback_result = dict(mediapipe_result)
+        fallback_result["reason"] = (
+            f"{fallback_result.get('reason', '')} Gemini fallback triggered: {fallback_reason[:240]}"
+        ).strip()
+        fallback_result["gemini_fallback_error"] = fallback_reason[:2000]
+        return attach_pipeline_metadata(
+            fallback_result,
+            requested_provider="hybrid",
+            executed_provider="mediapipe",
+            mediapipe_decision=mediapipe_result.get("decision"),
+            fallback_used=True,
+        )
+
+
+def analyze_video(provider: str, video_path: Path, args: argparse.Namespace) -> dict:
+    requested_provider = provider
+    if provider == "gemini":
+        try:
+            return analyze_video_gemini(
+                video_path=video_path,
+                pass_ratio=args.pass_ratio,
+                review_ratio=args.review_ratio,
+            )
+        except Exception as error:
+            if not DEFAULT_GEMINI_FALLBACK_TO_MEDIAPIPE:
+                raise
+            log_stderr("gemini fallback to mediapipe", error=str(error))
+            provider = "mediapipe"
+
+    if provider == "hybrid":
+        return analyze_video_hybrid(video_path=video_path, args=args)
+
+    model_path = ensure_model()
+    detector = create_detector(model_path)
+    try:
+        return attach_pipeline_metadata(analyze_video_mediapipe(
+            video_path=video_path,
+            detector=detector,
+            sample_fps=args.sample_fps,
+            min_window_hit_ratio=args.min_window_hit_ratio,
+            pass_ratio=args.pass_ratio,
+            review_ratio=args.review_ratio,
+        ), requested_provider=requested_provider, executed_provider="mediapipe")
     finally:
         detector.close()
 
