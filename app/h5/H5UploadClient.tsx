@@ -122,13 +122,6 @@ type ParticipantLookupResponse = {
   submissions: SubmissionSummary[];
 };
 
-type LeaderReferralBindResponse = {
-  status: "bound" | "already_bound";
-  participant_code: string;
-  leader_referral: LeaderReferralSummary | null;
-  detail: string | null;
-};
-
 type AccessConfirmState = "idle" | "success" | "invalid" | "network";
 
 const STORAGE_KEY = "h5-multipart-session-v2";
@@ -589,7 +582,6 @@ export default function H5UploadClient() {
   const searchParams = useSearchParams();
   const openedFromMenu = searchParams.get("from")?.trim() === "menu";
   const [participantCodeInput, setParticipantCodeInput] = useState("");
-  const [leaderPromoCodeInput, setLeaderPromoCodeInput] = useState("");
   const [viewer, setViewer] = useState<ParticipantLookupResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
@@ -663,12 +655,7 @@ export default function H5UploadClient() {
     }
   };
 
-  const confirmParticipantAccess = async (
-    code: string,
-    options?: {
-      leaderPromoCode?: string;
-    },
-  ) => {
+  const confirmParticipantAccess = async (code: string) => {
     if (!isLegalAgreementAccepted) {
       setLegalAgreementHint("继续确认上传码前，请先阅读并同意《数据采集与上传声明》。");
       setViewerError("继续前请先阅读并同意《数据采集与上传声明》。");
@@ -678,7 +665,6 @@ export default function H5UploadClient() {
     }
 
     const normalizedCode = normalizeSixDigitCode(code);
-    const normalizedLeaderPromoCode = normalizeSixDigitCode(options?.leaderPromoCode ?? leaderPromoCodeInput);
 
     if (!normalizedCode) {
       setViewer(null);
@@ -697,41 +683,12 @@ export default function H5UploadClient() {
       );
       fallbackViewer = nextViewer;
 
-      let resolvedViewer = nextViewer;
-      const currentBoundLeaderCode = nextViewer.leader_referral?.promo_code ?? "";
-
-      if (normalizedLeaderPromoCode) {
-        if (currentBoundLeaderCode && currentBoundLeaderCode !== normalizedLeaderPromoCode) {
-          setViewer(nextViewer);
-          setLeaderPromoCodeInput(currentBoundLeaderCode);
-          throw new Error("当前账号已绑定其他团长推广码，暂不支持修改。");
-        }
-
-        if (!currentBoundLeaderCode) {
-          await fetchJson<LeaderReferralBindResponse>("/api/h5/leader-referral/bind", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              participant_code: nextViewer.participant.participant_code,
-              leader_promo_code: normalizedLeaderPromoCode,
-            }),
-          });
-
-          resolvedViewer = await fetchJson<ParticipantLookupResponse>(
-            `/api/h5/code/${encodeURIComponent(normalizedCode)}`,
-          );
-        }
-      }
-
-      setViewer(resolvedViewer);
-      setParticipantCodeInput(resolvedViewer.participant.participant_code);
-      setLeaderPromoCodeInput(resolvedViewer.leader_referral?.promo_code ?? normalizedLeaderPromoCode);
+      setViewer(nextViewer);
+      setParticipantCodeInput(nextViewer.participant.participant_code);
       setAccessConfirmState("success");
-      const nextScene = resolvedViewer.scenes[0]?.name ?? "";
+      const nextScene = nextViewer.scenes[0]?.name ?? "";
       setScene((current) =>
-        current && resolvedViewer.scenes.some((item) => item.name === current) ? current : nextScene,
+        current && nextViewer.scenes.some((item) => item.name === current) ? current : nextScene,
       );
     } catch (error) {
       setViewer(fallbackViewer);
@@ -749,18 +706,11 @@ export default function H5UploadClient() {
 
   useEffect(() => {
     const codeFromQuery = searchParams.get("code")?.trim() ?? "";
-    const leaderPromoCodeFromQuery = normalizeSixDigitCode(
-      searchParams.get("leader")?.trim() ??
-        searchParams.get("promo")?.trim() ??
-        searchParams.get("leaderPromoCode")?.trim() ??
-        "",
-    );
     const nextStored = readStoredSession();
     setStoredSession(nextStored);
     setIsLegalAgreementAccepted(readLegalAgreementAccepted());
 
     const initialCode = codeFromQuery || nextStored?.participantCode || "";
-    setLeaderPromoCodeInput(leaderPromoCodeFromQuery);
     if (!initialCode) {
       return;
     }
@@ -1229,37 +1179,12 @@ export default function H5UploadClient() {
               </p>
             </div>
           </div>
-          <div className="field referral-field" style={{ marginTop: 14 }}>
-            <label htmlFor="leaderPromoCodeClean">推荐码(可选)</label>
-            <input
-              id="leaderPromoCodeClean"
-              inputMode="numeric"
-              maxLength={6}
-              value={leaderPromoCodeInput}
-              onChange={(event) => {
-                setLeaderPromoCodeInput(normalizeSixDigitCode(event.target.value));
-                if (!viewer?.leader_referral) {
-                  setAccessConfirmState("idle");
-                  setViewerError(null);
-                }
-              }}
-              placeholder="如有推荐码，请输入 6 位数字"
-              disabled={Boolean(viewer?.leader_referral)}
-            />
-            <p className="field-hint">
-              如果是通过团长渠道开始任务则填写推荐码，若不是则不用填写。
-            </p>
-          </div>
           <div className="submit-row confirm-action-row">
             {!isAccessConfirmed ? (
               <button
                 className="submit-button"
                 disabled={isLookingUp || participantCodeInput.trim().length === 0 || !isLegalAgreementAccepted}
-                onClick={() =>
-                  void confirmParticipantAccess(participantCodeInput, {
-                    leaderPromoCode: leaderPromoCodeInput,
-                  })
-                }
+                onClick={() => void confirmParticipantAccess(participantCodeInput)}
                 type="button"
               >
                 <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>
