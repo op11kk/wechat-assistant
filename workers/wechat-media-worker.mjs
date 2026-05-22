@@ -14,6 +14,7 @@ const env = {
   WECHAT_APP_ID: readEnv("WECHAT_APP_ID"),
   WECHAT_APP_SECRET: readEnv("WECHAT_APP_SECRET"),
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA"),
   COS_SECRET_ID: readEnv("COS_SECRET_ID"),
   COS_SECRET_KEY: readEnv("COS_SECRET_KEY"),
   COS_REGION: readEnv("COS_REGION"),
@@ -25,6 +26,8 @@ const WECHAT_TOKEN_TIMEOUT_MS = 10_000;
 const WECHAT_MEDIA_TIMEOUT_MS = 120_000;
 const COS_UPLOAD_TIMEOUT_MS = 120_000;
 const workerId = `wechat-media:${randomUUID().slice(0, 8)}`;
+const webMvpSchema = normalizePgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
 
 let tokenCache = {
   token: null,
@@ -33,6 +36,17 @@ let tokenCache = {
 
 let storageClient = null;
 let dbPool = null;
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -223,7 +237,7 @@ async function updateSubmission(submissionId, patch) {
   }
   values.push(submissionId);
   await getDbPool().query(
-    `update public.video_submissions set ${assignments.join(", ")} where id = $${index}`,
+    `update ${videoSubmissionsTable} set ${assignments.join(", ")} where id = $${index}`,
     values,
   );
 }

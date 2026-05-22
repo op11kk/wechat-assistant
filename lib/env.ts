@@ -6,9 +6,12 @@ export type ObjectStorageProvider = "cloudflare_r2" | "tencent_cos";
 
 export const env = {
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA") || "web_mvp",
   SUPABASE_URL: readEnv("SUPABASE_URL"),
   SUPABASE_KEY: readEnv("SUPABASE_KEY"),
   API_SECRET: readEnv("API_SECRET"),
+  APP_SESSION_SECRET: readEnv("APP_SESSION_SECRET"),
+  APP_DEBUG_AUTH_CODES: readEnv("APP_DEBUG_AUTH_CODES"),
   H5_CORS_ALLOWED_ORIGINS: readEnv("H5_CORS_ALLOWED_ORIGINS"),
   WECHAT_H5_ENTRY_URL: readEnv("WECHAT_H5_ENTRY_URL"),
   UPLOAD_PRESIGN_EXPIRES_IN: readEnv("UPLOAD_PRESIGN_EXPIRES_IN"),
@@ -46,6 +49,21 @@ export function assertDatabaseEnv(): void {
     return;
   }
   throw new Error("Missing DATABASE_URL");
+}
+
+function assertPgIdentifier(value: string, label: string): string {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+export function getWebMvpSchema(): string {
+  return assertPgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+}
+
+export function getWebMvpRelation(tableName: string): string {
+  return `${getWebMvpSchema()}.${assertPgIdentifier(tableName, "table name")}`;
 }
 
 export function hasR2Config(): boolean {

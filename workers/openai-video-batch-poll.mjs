@@ -9,10 +9,16 @@ const { Pool } = pg;
 
 const env = {
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA"),
   OPENAI_API_KEY: readEnv("OPENAI_API_KEY"),
   OPENAI_VIDEO_BATCH_POLL_INTERVAL_MS: readEnv("OPENAI_VIDEO_BATCH_POLL_INTERVAL_MS"),
   OPENAI_VIDEO_REVIEW_MAX_SUBMIT_ATTEMPTS: readEnv("OPENAI_VIDEO_REVIEW_MAX_SUBMIT_ATTEMPTS"),
 };
+
+const webMvpSchema = normalizePgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
+const openaiVideoReviewBatchesTable = pgRelation("web_openai_video_review_batches");
+const openaiVideoReviewBatchItemsTable = pgRelation("web_openai_video_review_batch_items");
 
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 const pollIntervalMs = parseBoundedInteger(env.OPENAI_VIDEO_BATCH_POLL_INTERVAL_MS, 60_000, 10_000, 10 * 60_000);
@@ -22,6 +28,17 @@ const workerEntry = "workers/openai-video-batch-poll.mjs";
 
 let dbPool = null;
 let shuttingDown = false;
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -82,7 +99,7 @@ async function openaiText(pathname) {
 async function listActiveBatches() {
   const result = await getDbPool().query(
     `select *
-     from public.openai_video_review_batches
+     from ${openaiVideoReviewBatchesTable}
      where openai_batch_id is not null
        and status in ('submitted', 'validating', 'in_progress', 'finalizing')
      order by id asc
@@ -172,7 +189,7 @@ async function runStep(step, context, action) {
 
 async function markBatchStatus(batch, openaiBatch, status, lastError = null) {
   await getDbPool().query(
-    `update public.openai_video_review_batches
+    `update ${openaiVideoReviewBatchesTable}
      set status = $1::text,
          output_file_id = $2::text,
          error_file_id = $3::text,
@@ -199,11 +216,11 @@ async function updateBatchSubmissionsPolling(batch, status) {
     batch_status: status,
   });
   await getDbPool().query(
-    `update public.video_submissions s
+    `update ${videoSubmissionsTable} s
      set analysis_status = 'polling',
          analysis_summary = 'Polling OpenAI Batch results',
          analysis_payload = $1::jsonb
-     from public.openai_video_review_batch_items i
+     from ${openaiVideoReviewBatchItemsTable} i
      where i.submission_id = s.id
        and i.batch_id = $2::bigint
        and i.status in ('queued', 'submitted')`,
@@ -220,7 +237,7 @@ async function markSubmissionRetryOrTerminal(submissionId, customId, errorPayloa
     error: errorText,
   });
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = case
            when submit_attempt >= $2::integer then 'failed_terminal'
            else 'retry_pending'
@@ -259,7 +276,7 @@ async function handleSuccessLine(line) {
   };
 
   const itemResult = await getDbPool().query(
-    `update public.openai_video_review_batch_items
+    `update ${openaiVideoReviewBatchItemsTable}
      set status = 'succeeded',
          result_json = $1::jsonb,
          last_error = null,
@@ -276,7 +293,7 @@ async function handleSuccessLine(line) {
   }
 
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'completed',
          analysis_decision = $1::text,
          analysis_ratio = $2::double precision,
@@ -295,7 +312,7 @@ async function handleFailedLine(line) {
   const customId = line.custom_id;
   const errorText = JSON.stringify(line.error ?? line.response ?? line).slice(0, 4000);
   const itemResult = await getDbPool().query(
-    `update public.openai_video_review_batch_items
+    `update ${openaiVideoReviewBatchItemsTable}
      set status = 'failed',
          last_error = $1::text,
          completed_at = now(),
@@ -340,7 +357,7 @@ async function handleBatchTerminalFailure(batch, openaiBatch, status) {
   await markBatchStatus(batch, openaiBatch, status, errorText);
 
   const result = await getDbPool().query(
-    `update public.openai_video_review_batch_items
+    `update ${openaiVideoReviewBatchItemsTable}
      set status = 'failed',
          last_error = $1::text,
          completed_at = now(),

@@ -13,6 +13,7 @@ const { Pool } = pg;
 
 const env = {
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA"),
   OPENAI_API_KEY: readEnv("OPENAI_API_KEY"),
   OPENAI_VIDEO_REVIEW_MODEL: readEnv("OPENAI_VIDEO_REVIEW_MODEL"),
   OPENAI_VIDEO_BATCH_LIMIT: readEnv("OPENAI_VIDEO_BATCH_LIMIT"),
@@ -24,6 +25,11 @@ const env = {
   COS_SECRET_KEY: readEnv("COS_SECRET_KEY"),
   COS_REGION: readEnv("COS_REGION"),
 };
+
+const webMvpSchema = normalizePgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
+const openaiVideoReviewBatchesTable = pgRelation("web_openai_video_review_batches");
+const openaiVideoReviewBatchItemsTable = pgRelation("web_openai_video_review_batch_items");
 
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 const model = env.OPENAI_VIDEO_REVIEW_MODEL || "gpt-4.1-mini";
@@ -44,6 +50,17 @@ const workerEntry = "workers/openai-video-batch-submit.mjs";
 
 let dbPool = null;
 let storageClient = null;
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -226,7 +243,7 @@ async function createOpenAiBatch(inputFileId) {
 
 async function markAbandonedLocalBatches() {
   await getDbPool().query(
-    `update public.openai_video_review_batches
+    `update ${openaiVideoReviewBatchesTable}
      set status = 'failed',
          last_error = coalesce(last_error, 'Local submit interrupted before OpenAI Batch was created.'),
          completed_at = coalesce(completed_at, now()),
@@ -241,7 +258,7 @@ async function claimTargets() {
   const result = await getDbPool().query(
     `with candidate as (
        select s.id
-       from public.video_submissions s
+       from ${videoSubmissionsTable} s
        where s.id >= $2::bigint
          and coalesce(s.analysis_status, 'queued') in ('preprocess_ready', 'retry_pending', 'submit_pending')
          and coalesce(s.contact_sheet_count, 0) > 0
@@ -249,8 +266,8 @@ async function claimTargets() {
          and (s.lease_expires_at is null or s.lease_expires_at < now())
          and not exists (
            select 1
-           from public.openai_video_review_batch_items i
-           left join public.openai_video_review_batches b
+           from ${openaiVideoReviewBatchItemsTable} i
+           left join ${openaiVideoReviewBatchesTable} b
              on b.id = i.batch_id
            where i.submission_id = s.id
              and coalesce(i.preprocess_version, -1) = coalesce(s.preprocess_version, -1)
@@ -264,7 +281,7 @@ async function claimTargets() {
        for update skip locked
        limit $1::integer
      )
-     update public.video_submissions s
+     update ${videoSubmissionsTable} s
      set analysis_status = 'submit_pending',
          lease_owner = $4::text,
          lease_expires_at = now() + make_interval(mins => $5::integer)
@@ -278,7 +295,7 @@ async function claimTargets() {
 
 async function createLocalBatch() {
   const result = await getDbPool().query(
-    `insert into public.openai_video_review_batches (status, model, worker_id)
+    `insert into ${openaiVideoReviewBatchesTable} (status, model, worker_id)
      values ('preparing', $1::text, $2::text)
      returning *`,
     [model, workerId],
@@ -289,8 +306,8 @@ async function createLocalBatch() {
 async function findReusableBatchItem(submissionId, preprocessVersion) {
   const result = await getDbPool().query(
     `select i.*
-     from public.openai_video_review_batch_items i
-     left join public.openai_video_review_batches b
+     from ${openaiVideoReviewBatchItemsTable} i
+     left join ${openaiVideoReviewBatchesTable} b
        on b.id = i.batch_id
      where i.submission_id = $1::bigint
        and coalesce(i.preprocess_version, -1) = $2::integer
@@ -311,8 +328,8 @@ async function findBatchItemByCustomId(customId) {
     `select i.*,
             b.status as batch_status,
             b.openai_batch_id
-     from public.openai_video_review_batch_items i
-     left join public.openai_video_review_batches b
+     from ${openaiVideoReviewBatchItemsTable} i
+     left join ${openaiVideoReviewBatchesTable} b
        on b.id = i.batch_id
      where i.custom_id = $1::text
      limit 1`,
@@ -351,7 +368,7 @@ async function insertBatchItem(batchId, submission, customId, imageObjectKeys) {
   const firstKey = imageObjectKeys[0] ?? null;
   try {
     const result = await getDbPool().query(
-      `insert into public.openai_video_review_batch_items (
+      `insert into ${openaiVideoReviewBatchItemsTable} (
          batch_id,
          submission_id,
          custom_id,
@@ -383,7 +400,7 @@ async function insertBatchItem(batchId, submission, customId, imageObjectKeys) {
 
 async function requeueBatchItem(itemId, batchId) {
   const result = await getDbPool().query(
-    `update public.openai_video_review_batch_items
+    `update ${openaiVideoReviewBatchItemsTable}
      set batch_id = $1::bigint,
          status = 'queued',
          last_error = null,
@@ -398,7 +415,7 @@ async function requeueBatchItem(itemId, batchId) {
 
 async function releaseSubmissionForLater(submissionId, summary) {
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'submit_pending',
          analysis_summary = $2::text,
          lease_owner = null,
@@ -410,7 +427,7 @@ async function releaseSubmissionForLater(submissionId, summary) {
 
 async function markSubmissionAlreadySubmitted(submissionId, item) {
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'submitted',
          openai_batch_id = $2::text,
          openai_custom_id = $3::text,
@@ -433,7 +450,7 @@ async function markSubmissionAlreadySubmitted(submissionId, item) {
 
 async function markSubmissionRetryState(submissionId, errorText, terminal = false) {
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = case
            when coalesce(submit_attempt, 0) + 1 >= ($2::integer) or $4::boolean then 'failed_terminal'
            else 'retry_pending'
@@ -459,7 +476,7 @@ async function markSubmissionRetryState(submissionId, errorText, terminal = fals
 
 async function markSubmissionSubmitted(submissionId, batch, item) {
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'submitted',
          openai_batch_id = $2::text,
          openai_custom_id = $3::text,
@@ -637,7 +654,7 @@ async function submitBatch() {
     const openaiBatch = await createOpenAiBatch(inputFile.id);
 
     await getDbPool().query(
-      `update public.openai_video_review_batches
+      `update ${openaiVideoReviewBatchesTable}
        set status = 'submitted',
            openai_batch_id = $1::text,
            input_file_id = $2::text,
@@ -650,7 +667,7 @@ async function submitBatch() {
     batch.openai_batch_id = openaiBatch.id;
 
     await getDbPool().query(
-      `update public.openai_video_review_batch_items
+      `update ${openaiVideoReviewBatchItemsTable}
        set status = 'submitted',
            updated_at = now()
        where batch_id = $1::bigint`,
@@ -686,7 +703,7 @@ async function submitBatch() {
 
 async function markLocalBatchFailed(batchId, message) {
   await getDbPool().query(
-    `update public.openai_video_review_batches
+    `update ${openaiVideoReviewBatchesTable}
      set status = 'failed',
          last_error = $1::text,
          completed_at = now(),

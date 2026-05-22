@@ -14,6 +14,7 @@ const { Pool } = pg;
 
 const env = {
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA"),
   CLOUDFLARE_R2_ACCOUNT_ID: readEnv("CLOUDFLARE_R2_ACCOUNT_ID"),
   CLOUDFLARE_R2_ACCESS_KEY_ID: readEnv("CLOUDFLARE_R2_ACCESS_KEY_ID"),
   CLOUDFLARE_R2_SECRET_ACCESS_KEY: readEnv("CLOUDFLARE_R2_SECRET_ACCESS_KEY"),
@@ -33,6 +34,10 @@ const env = {
   VIDEO_ANALYSIS_REVIEW_RATIO: readEnv("VIDEO_ANALYSIS_REVIEW_RATIO"),
   VIDEO_ANALYSIS_TIMEOUT_MS: readEnv("VIDEO_ANALYSIS_TIMEOUT_MS"),
 };
+
+const webMvpSchema = normalizePgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
+const videoAnalysisJobsTable = pgRelation("web_video_analysis_jobs");
 
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 const provider = getStorageProvider();
@@ -70,6 +75,17 @@ if (!existsSync(analyzerScriptPath)) {
 let dbPool = null;
 let storageClient = null;
 let shuttingDown = false;
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -173,13 +189,13 @@ async function claimNextJob() {
   const result = await getDbPool().query(
     `with candidate as (
        select id
-       from public.video_analysis_jobs
+       from ${videoAnalysisJobsTable}
        where status = 'pending'
        order by id asc
        for update skip locked
        limit 1
      )
-     update public.video_analysis_jobs as jobs
+     update ${videoAnalysisJobsTable} as jobs
      set status = 'running',
          attempts = jobs.attempts + 1,
          worker_id = $1,
@@ -197,7 +213,7 @@ async function claimNextJob() {
     return null;
   }
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'running',
          analysis_summary = null,
          analysis_started_at = now(),
@@ -330,7 +346,7 @@ async function markJobSucceeded(job, result) {
   const summary = buildSuccessSummary(result);
 
   await getDbPool().query(
-    `update public.video_analysis_jobs
+    `update ${videoAnalysisJobsTable}
      set status = 'succeeded',
          result_json = $1::jsonb,
          completed_at = now(),
@@ -340,7 +356,7 @@ async function markJobSucceeded(job, result) {
   );
 
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'succeeded',
          analysis_decision = $1,
          analysis_ratio = $2,
@@ -357,7 +373,7 @@ async function markJobFailed(job, error) {
   const payload = JSON.stringify({ error: message });
 
   await getDbPool().query(
-    `update public.video_analysis_jobs
+    `update ${videoAnalysisJobsTable}
      set status = 'failed',
          last_error = $1,
          result_json = $2::jsonb,
@@ -368,7 +384,7 @@ async function markJobFailed(job, error) {
   );
 
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'failed',
          analysis_summary = $1,
          analysis_payload = $2::jsonb,

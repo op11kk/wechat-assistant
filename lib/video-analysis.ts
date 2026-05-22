@@ -1,7 +1,9 @@
 import type { QueryResultRow } from "pg";
 
 import { dbQuery, dbQueryMaybeOne } from "@/lib/db";
-import { env } from "@/lib/env";
+import { env, getWebMvpRelation } from "@/lib/env";
+
+const webVideoSubmissionsTable = getWebMvpRelation("web_video_submissions");
 
 export const VIDEO_ANALYSIS_STATUSES = new Set([
   "queued",
@@ -159,9 +161,9 @@ async function getSubmissionStateRow(submissionId: number): Promise<QueryResultR
        analysis_payload,
        analysis_started_at,
        analysis_completed_at,
-       raw_cos_bucket,
-       raw_cos_key,
-       raw_cos_region,
+       raw_bucket as raw_cos_bucket,
+       raw_key as raw_cos_key,
+       raw_region as raw_cos_region,
        preprocess_version,
        contact_sheet_manifest_json,
        contact_sheet_count,
@@ -172,7 +174,7 @@ async function getSubmissionStateRow(submissionId: number): Promise<QueryResultR
        lease_expires_at,
        created_at,
        now() as updated_at
-     from public.video_submissions
+     from ${webVideoSubmissionsTable}
      where id = $1
      limit 1`,
     [submissionId],
@@ -193,7 +195,7 @@ export async function enqueueVideoAnalysisJob(params: {
 }): Promise<VideoAnalysisJobRow> {
   const rawLocation = buildRawStorageLocation(params.objectKey);
   await dbQuery(
-    `update public.video_submissions
+    `update ${webVideoSubmissionsTable}
      set object_key = $2,
          analysis_status = 'queued',
          analysis_decision = null,
@@ -202,9 +204,9 @@ export async function enqueueVideoAnalysisJob(params: {
          analysis_payload = '{}'::jsonb,
          analysis_started_at = null,
          analysis_completed_at = null,
-         raw_cos_bucket = coalesce($3, raw_cos_bucket),
-         raw_cos_key = $4,
-         raw_cos_region = coalesce($5, raw_cos_region),
+         raw_bucket = coalesce($3, raw_bucket),
+         raw_key = $4,
+         raw_region = coalesce($5, raw_region),
          contact_sheet_manifest_json = '{}'::jsonb,
          contact_sheet_count = 0,
          openai_batch_id = null,
@@ -253,7 +255,7 @@ export async function getVideoAnalysisSubmissionById(
        analysis_started_at,
        analysis_completed_at,
        created_at
-     from public.video_submissions
+     from ${webVideoSubmissionsTable}
      where id = $1
      limit 1`,
     [submissionId],
@@ -295,7 +297,7 @@ export async function listRecentVideoAnalysisStates(limit = 20): Promise<QueryRe
        s.lease_owner,
        s.lease_expires_at,
        s.created_at
-     from public.video_submissions s
+     from ${webVideoSubmissionsTable} s
      order by s.id desc
      limit $1`,
     [limit],

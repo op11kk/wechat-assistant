@@ -1,12 +1,14 @@
 import { after, NextRequest } from "next/server";
 
+import { logAdminAuditEvent } from "@/lib/admin-audit";
+import { getCurrentAppUserFromRequest } from "@/lib/app-auth";
 import { requireApiAuth } from "@/lib/auth";
 import { jsonResponse } from "@/lib/http";
+import { buildReviewPatch, isReviewStatus, type ReviewStatus } from "@/lib/video-review-state";
 import {
   decorateSubmissionObjectUrl,
   findParticipantById,
   getVideoSubmissionById,
-  REVIEW_STATUSES,
   updateParticipantWorkflow,
   updateVideoSubmissionReview,
 } from "@/lib/video-submissions";
@@ -98,19 +100,15 @@ export async function PATCH(
     return jsonResponse({ error: "Invalid or empty JSON body" }, 400);
   }
 
-  let reviewStatus: "pending" | "approved" | "rejected" | undefined;
+  let reviewStatus: ReviewStatus | undefined;
   let rejectReason: string | null | undefined;
-  let reviewedAt: string | null | undefined;
 
   if ("review_status" in body) {
     const rawReviewStatus = String(body.review_status ?? "").trim();
-    if (!REVIEW_STATUSES.has(rawReviewStatus)) {
+    if (!isReviewStatus(rawReviewStatus)) {
       return jsonResponse({ error: "invalid review_status" }, 400);
     }
-    reviewStatus = rawReviewStatus as typeof reviewStatus;
-    if (reviewStatus === "approved" || reviewStatus === "rejected") {
-      reviewedAt = new Date().toISOString();
-    }
+    reviewStatus = rawReviewStatus;
   }
 
   if ("reject_reason" in body) {
@@ -125,20 +123,49 @@ export async function PATCH(
     }
   }
 
-  if (reviewStatus === undefined && rejectReason === undefined && reviewedAt === undefined) {
+  if (reviewStatus === undefined && rejectReason === undefined) {
     return jsonResponse({ error: "No patchable fields", detail: "review_status, reject_reason" }, 400);
   }
 
   try {
+    const current = await getVideoSubmissionById(id);
+    if (!current) {
+      return jsonResponse({ error: "submission not found", hint: id }, 404);
+    }
+
+    const reviewPatch = buildReviewPatch({
+      currentStatus: current.review_status,
+      nextStatus: reviewStatus,
+      rejectReason,
+    });
+    if (!reviewPatch.ok) {
+      return jsonResponse({ error: reviewPatch.error, detail: reviewPatch.detail }, 400);
+    }
+
     const data = await updateVideoSubmissionReview({
       id,
-      reviewStatus,
-      rejectReason,
-      reviewedAt,
+      reviewStatus: reviewPatch.reviewStatus,
+      rejectReason: reviewPatch.rejectReason,
+      reviewedAt: reviewPatch.reviewedAt,
     });
     if (!data) {
       return jsonResponse({ error: "submission not found", hint: id }, 404);
     }
+
+    const actor = await getCurrentAppUserFromRequest(request).catch(() => null);
+    await logAdminAuditEvent({
+      request,
+      actor,
+      action: "submission.review_update",
+      targetType: "video_submission",
+      targetId: id,
+      targetLabel: data.participant_code,
+      payload: {
+        review_status: data.review_status,
+        reject_reason: data.reject_reason,
+        reviewed_at: data.reviewed_at,
+      },
+    });
 
     const finalReviewStatus = data.review_status;
 

@@ -13,6 +13,7 @@ const { Pool } = pg;
 
 const env = {
   DATABASE_URL: readEnv("DATABASE_URL"),
+  WEB_MVP_SCHEMA: readEnv("WEB_MVP_SCHEMA"),
   COS_SECRET_ID: readEnv("COS_SECRET_ID"),
   COS_SECRET_KEY: readEnv("COS_SECRET_KEY"),
   COS_REGION: readEnv("COS_REGION"),
@@ -31,6 +32,10 @@ const env = {
   OPENAI_VIDEO_PREPROCESS_FFMPEG_BIN: readEnv("OPENAI_VIDEO_PREPROCESS_FFMPEG_BIN"),
   OPENAI_VIDEO_PREPROCESS_FFPROBE_BIN: readEnv("OPENAI_VIDEO_PREPROCESS_FFPROBE_BIN"),
 };
+
+const webMvpSchema = normalizePgIdentifier(env.WEB_MVP_SCHEMA || "web_mvp", "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
+const videoSubmissionArtifactsTable = pgRelation("web_video_submission_artifacts");
 
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 const minSubmissionId = parseBoundedInteger(
@@ -77,6 +82,17 @@ const frameEdge = Math.max(
 let dbPool = null;
 let storageClient = null;
 let shuttingDown = false;
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 function readEnv(name) {
   return process.env[name]?.trim() ?? "";
@@ -733,8 +749,8 @@ async function claimNextSubmission() {
   const result = await getDbPool().query(
     `with candidate as (
        select id
-       from public.video_submissions
-       where coalesce(raw_cos_key, object_key) is not null
+       from ${videoSubmissionsTable}
+       where coalesce(raw_key, object_key) is not null
          and id >= $3
          and coalesce(analysis_status, 'queued') in ('queued', 'retry_pending', 'pending', 'failed')
          and (lease_expires_at is null or lease_expires_at < now())
@@ -742,7 +758,7 @@ async function claimNextSubmission() {
        for update skip locked
        limit 1
      )
-     update public.video_submissions s
+     update ${videoSubmissionsTable} s
      set analysis_status = 'preprocessing',
          preprocess_version = s.preprocess_version + 1,
          last_error = null,
@@ -760,7 +776,7 @@ async function claimNextSubmission() {
 
 async function markExpiredLeasesRetryable() {
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'retry_pending',
          last_error = coalesce(last_error, 'Preprocess worker lease expired before completion.'),
          lease_owner = null,
@@ -773,7 +789,7 @@ async function markExpiredLeasesRetryable() {
 
 async function saveArtifacts(submissionId, preprocessVersion, artifacts) {
   await getDbPool().query(
-    `delete from public.video_submission_artifacts
+    `delete from ${videoSubmissionArtifactsTable}
      where submission_id = $1
        and preprocess_version = $2`,
     [submissionId, preprocessVersion],
@@ -781,7 +797,7 @@ async function saveArtifacts(submissionId, preprocessVersion, artifacts) {
 
   for (const artifact of artifacts) {
     await getDbPool().query(
-      `insert into public.video_submission_artifacts (
+      `insert into ${videoSubmissionArtifactsTable} (
          submission_id,
          preprocess_version,
          artifact_type,
@@ -817,7 +833,7 @@ async function saveArtifacts(submissionId, preprocessVersion, artifacts) {
 async function markPreprocessSucceeded(submission, manifest, artifacts, durationSec) {
   await saveArtifacts(submission.id, submission.preprocess_version, artifacts);
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = 'preprocess_ready',
          duration_sec = $2,
          analysis_summary = 'Contact sheets ready for OpenAI Batch review',
@@ -848,7 +864,7 @@ async function markPreprocessFailed(submission, error) {
   const nextStatus = attempt >= maxAttempts ? "failed_terminal" : "retry_pending";
   const message = error instanceof Error ? error.message : String(error);
   await getDbPool().query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set analysis_status = $2::text,
          analysis_summary = $3::text,
          analysis_payload = jsonb_build_object(
@@ -867,9 +883,9 @@ async function markPreprocessFailed(submission, error) {
 }
 
 async function preprocessSubmission(submission) {
-  const bucket = String(submission.raw_cos_bucket || env.COS_BUCKET || "").trim();
-  const objectKey = String(submission.raw_cos_key || submission.object_key || "").trim();
-  const region = String(submission.raw_cos_region || env.COS_REGION || "").trim();
+  const bucket = String(submission.raw_bucket || env.COS_BUCKET || "").trim();
+  const objectKey = String(submission.raw_key || submission.object_key || "").trim();
+  const region = String(submission.raw_region || env.COS_REGION || "").trim();
   if (!bucket || !objectKey || !region) {
     throw new Error(`Submission ${submission.id} is missing raw COS location metadata`);
   }
@@ -994,7 +1010,7 @@ async function runOnce() {
       workerId,
       submissionId: submission.id,
       preprocessVersion: submission.preprocess_version,
-      objectKey: submission.raw_cos_key || submission.object_key,
+      objectKey: submission.raw_key || submission.object_key,
     });
 
     try {

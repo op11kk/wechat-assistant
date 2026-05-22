@@ -1,20 +1,25 @@
 import type { PoolClient, QueryResultRow } from "pg";
 
-import { buildPublicObjectUrl, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
+import { buildPublicObjectUrl, getWebMvpRelation, hasObjectStorageConfig, hasWechatMediaConfig } from "@/lib/env";
 import { enqueueVideoAnalysisJob, type VideoAnalysisDecision, type VideoAnalysisStatus } from "@/lib/video-analysis";
 import { dbQuery, dbQueryMaybeOne, dbQueryOne, withDbTransaction } from "@/lib/db";
 import { isDuplicateError } from "@/lib/http";
 import { buildChatObjectKey, putObjectBuffer } from "@/lib/r2";
 import { downloadWechatMedia } from "@/lib/wechat";
 import type { H5FormalStatus, H5TestStatus, H5UploadKind } from "@/lib/h5-workflow";
+import { REVIEW_STATUS_SET, type ReviewStatus } from "@/lib/video-review-state";
 
-export const REVIEW_STATUSES = new Set(["pending", "approved", "rejected"]);
+export const REVIEW_STATUSES = REVIEW_STATUS_SET;
 export const PARTICIPANT_STATUSES = new Set(["active", "paused", "withdrawn"]);
 export const SUBMISSION_SOURCES = new Set(["chat", "h5"]);
 
 const PARTICIPANT_CODE_MIN = 1;
 const PARTICIPANT_CODE_MAX = 999_999;
 const PARTICIPANT_CODE_ALLOCATION_LOCK_KEY = 2204223001;
+const webCollectorsTable = getWebMvpRelation("web_collectors");
+const webTeamsTable = getWebMvpRelation("web_teams");
+const webTeamBindLogsTable = getWebMvpRelation("web_team_bind_logs");
+const webVideoSubmissionsTable = getWebMvpRelation("web_video_submissions");
 
 export type ParticipantRow = {
   id: number;
@@ -58,7 +63,7 @@ export type VideoSubmissionRow = {
   user_comment: string | null;
   submission_type: H5UploadKind | null;
   scene: string | null;
-  review_status: "pending" | "approved" | "rejected";
+  review_status: ReviewStatus;
   reject_reason: string | null;
   reviewed_at: string | null;
   analysis_status: VideoAnalysisStatus;
@@ -88,6 +93,7 @@ type VideoSubmissionInsert = {
 };
 
 type CreateParticipantInput = {
+  appUserId?: number | null;
   wechatOpenid: string;
   realName?: string | null;
   phone?: string | null;
@@ -214,9 +220,89 @@ function mapVideoSubmissionRow(row: QueryResultRow): VideoSubmissionRow {
   };
 }
 
+function participantSelectSql(collectorAlias = "c", teamAlias = "t"): string {
+  return `
+    ${collectorAlias}.id,
+    coalesce(${collectorAlias}.extra ->> 'wechat_openid', '') as wechat_openid,
+    ${collectorAlias}.real_name,
+    ${collectorAlias}.phone,
+    ${collectorAlias}.collector_code as participant_code,
+    ${collectorAlias}.status,
+    ${collectorAlias}.team_id as leader_promoter_id,
+    ${teamAlias}.team_code as leader_promo_code,
+    ${collectorAlias}.team_bound_at as leader_bound_at,
+    case
+      when ${collectorAlias}.extra ? 'consent_confirmed'
+        then (${collectorAlias}.extra ->> 'consent_confirmed')::boolean
+      else null
+    end as consent_confirmed,
+    ${collectorAlias}.extra ->> 'test_status' as test_status,
+    ${collectorAlias}.extra ->> 'formal_status' as formal_status,
+    ${collectorAlias}.extra,
+    ${collectorAlias}.created_at,
+    ${collectorAlias}.updated_at
+  `;
+}
+
+function leaderPromoterSelectSql(alias = "t"): string {
+  return `
+    ${alias}.id,
+    ${alias}.team_name as promoter_name,
+    ${alias}.team_code as promo_code,
+    ${alias}.status,
+    ${alias}.note,
+    ${alias}.created_at,
+    ${alias}.updated_at
+  `;
+}
+
+function videoSubmissionSelectSql(alias = "s"): string {
+  return `
+    ${alias}.id,
+    ${alias}.collector_id as participant_id,
+    ${alias}.collector_code as participant_code,
+    ${alias}.source,
+    ${alias}.extra ->> 'wechat_media_id' as wechat_media_id,
+    ${alias}.object_key,
+    ${alias}.file_name,
+    ${alias}.size_bytes,
+    ${alias}.mime,
+    ${alias}.duration_sec,
+    ${alias}.user_comment,
+    ${alias}.extra ->> 'submission_type' as submission_type,
+    ${alias}.extra ->> 'scene' as scene,
+    ${alias}.review_status,
+    ${alias}.reject_reason,
+    ${alias}.reviewed_at,
+    ${alias}.analysis_status,
+    ${alias}.analysis_decision,
+    ${alias}.analysis_ratio,
+    ${alias}.analysis_summary,
+    ${alias}.analysis_payload,
+    ${alias}.analysis_started_at,
+    ${alias}.analysis_completed_at,
+    ${alias}.created_at
+  `;
+}
+
+function buildParticipantExtra(params: CreateParticipantInput): Record<string, unknown> {
+  return {
+    ...(params.extra ?? {}),
+    wechat_openid: params.wechatOpenid,
+    consent_confirmed: params.consentConfirmed ?? true,
+    test_status: params.testStatus ?? "not_started",
+    formal_status: params.formalStatus ?? "not_started",
+  };
+}
+
 export async function findParticipantByOpenId(openid: string): Promise<ParticipantRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.participants where wechat_openid = $1 limit 1`,
+    `select ${participantSelectSql("c", "t")}
+     from ${webCollectorsTable} c
+     left join ${webTeamsTable} t
+       on t.id = c.team_id
+     where c.extra ->> 'wechat_openid' = $1
+     limit 1`,
     [openid],
   );
   return row ? mapParticipantRow(row) : null;
@@ -224,7 +310,12 @@ export async function findParticipantByOpenId(openid: string): Promise<Participa
 
 export async function findParticipantByCode(participantCode: string): Promise<ParticipantRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.participants where participant_code = $1 limit 1`,
+    `select ${participantSelectSql("c", "t")}
+     from ${webCollectorsTable} c
+     left join ${webTeamsTable} t
+       on t.id = c.team_id
+     where c.collector_code = $1
+     limit 1`,
     [participantCode],
   );
   return row ? mapParticipantRow(row) : null;
@@ -232,7 +323,12 @@ export async function findParticipantByCode(participantCode: string): Promise<Pa
 
 export async function findParticipantById(participantId: number): Promise<ParticipantRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.participants where id = $1 limit 1`,
+    `select ${participantSelectSql("c", "t")}
+     from ${webCollectorsTable} c
+     left join ${webTeamsTable} t
+       on t.id = c.team_id
+     where c.id = $1
+     limit 1`,
     [participantId],
   );
   return row ? mapParticipantRow(row) : null;
@@ -240,7 +336,10 @@ export async function findParticipantById(participantId: number): Promise<Partic
 
 export async function findLeaderPromoterByCode(promoCode: string): Promise<LeaderPromoterRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.team_leader_promoters where promo_code = $1 limit 1`,
+    `select ${leaderPromoterSelectSql("t")}
+     from ${webTeamsTable} t
+     where t.team_code = $1
+     limit 1`,
     [promoCode],
   );
   return row ? mapLeaderPromoterRow(row) : null;
@@ -274,15 +373,30 @@ export async function updateParticipantWorkflow(
     return findParticipantById(participantId);
   }
 
+  const participant = await findParticipantById(participantId);
+  if (!participant) {
+    return null;
+  }
+  const nextExtra = { ...participant.extra };
+  if (patch.consent_confirmed !== undefined) {
+    nextExtra.consent_confirmed = patch.consent_confirmed;
+  }
+  if (patch.test_status !== undefined) {
+    nextExtra.test_status = patch.test_status;
+  }
+  if (patch.formal_status !== undefined) {
+    nextExtra.formal_status = patch.formal_status;
+  }
+
   const row = await dbQueryMaybeOne(
-    `update public.participants
-     set ${assignments.join(", ")},
+    `update ${webCollectorsTable}
+     set extra = $1,
          updated_at = now()
-     where id = $${values.length + 1}
-     returning *`,
-    [...values, participantId],
+     where id = $2
+     returning id`,
+    [nextExtra, participantId],
   );
-  return row ? mapParticipantRow(row) : null;
+  return row ? findParticipantById(participantId) : null;
 }
 
 export async function updateParticipantExtra(
@@ -300,14 +414,14 @@ export async function updateParticipantExtra(
   };
 
   const row = await dbQueryMaybeOne(
-    `update public.participants
+    `update ${webCollectorsTable}
      set extra = $1,
          updated_at = now()
      where id = $2
-     returning *`,
+     returning id`,
     [nextExtra, participantId],
   );
-  return row ? mapParticipantRow(row) : null;
+  return row ? findParticipantById(participantId) : null;
 }
 
 export async function bindParticipantLeaderPromoter(params: {
@@ -325,7 +439,12 @@ export async function bindParticipantLeaderPromoter(params: {
 
   return withDbTransaction(async (client) => {
     const participantResult = await client.query(
-      `select * from public.participants where participant_code = $1 limit 1`,
+      `select ${participantSelectSql("c", "t")}
+       from ${webCollectorsTable} c
+       left join ${webTeamsTable} t
+         on t.id = c.team_id
+       where c.collector_code = $1
+       limit 1`,
       [normalizedParticipantCode],
     );
     const participantRow = participantResult.rows[0];
@@ -339,7 +458,10 @@ export async function bindParticipantLeaderPromoter(params: {
     const participant = mapParticipantRow(participantRow);
     if (participant.leader_promoter_id && participant.leader_promo_code) {
       const promoterResult = await client.query(
-        `select * from public.team_leader_promoters where id = $1 limit 1`,
+        `select ${leaderPromoterSelectSql("t")}
+         from ${webTeamsTable} t
+         where t.id = $1
+         limit 1`,
         [participant.leader_promoter_id],
       );
       const promoterRow = promoterResult.rows[0];
@@ -356,7 +478,10 @@ export async function bindParticipantLeaderPromoter(params: {
     }
 
     const promoterResult = await client.query(
-      `select * from public.team_leader_promoters where promo_code = $1 limit 1`,
+      `select ${leaderPromoterSelectSql("t")}
+       from ${webTeamsTable} t
+       where t.team_code = $1
+       limit 1`,
       [normalizedLeaderPromoCode],
     );
     const promoterRow = promoterResult.rows[0];
@@ -379,27 +504,37 @@ export async function bindParticipantLeaderPromoter(params: {
     }
 
     const updatedParticipantResult = await client.query(
-      `update public.participants
-       set leader_promoter_id = $1,
-           leader_promo_code = $2,
-           leader_bound_at = now(),
+      `update ${webCollectorsTable}
+       set team_id = $1,
+           team_bound_at = now(),
            updated_at = now()
-       where id = $3
-       returning *`,
-      [promoter.id, promoter.promo_code, participant.id],
+       where id = $2
+       returning id`,
+      [promoter.id, participant.id],
     );
 
-    const updatedParticipant = mapParticipantRow(updatedParticipantResult.rows[0]);
+    const updatedParticipantRow = (
+      await client.query(
+        `select ${participantSelectSql("c", "t")}
+         from ${webCollectorsTable} c
+         left join ${webTeamsTable} t
+           on t.id = c.team_id
+         where c.id = $1
+         limit 1`,
+        [parseInteger(updatedParticipantResult.rows[0].id)],
+      )
+    ).rows[0];
+    const updatedParticipant = mapParticipantRow(updatedParticipantRow);
 
     await client.query(
-      `insert into public.participant_referral_bind_logs (
-         participant_id,
-         participant_code,
-         leader_promoter_id,
-         leader_promo_code,
+      `insert into ${webTeamBindLogsTable} (
+         collector_id,
+         team_id,
+         team_code,
+         bind_type,
          source
-       ) values ($1, $2, $3, $4, $5)`,
-      [updatedParticipant.id, updatedParticipant.participant_code, promoter.id, promoter.promo_code, params.source ?? "h5"],
+       ) values ($1, $2, $3, 'bind', $4)`,
+      [updatedParticipant.id, promoter.id, promoter.promo_code, "web"],
     );
 
     return {
@@ -415,9 +550,9 @@ export async function findParticipantByCodeAndOpenId(
   openid: string,
 ): Promise<Pick<ParticipantRow, "id" | "participant_code" | "status"> | null> {
   const row = await dbQueryMaybeOne(
-    `select id, participant_code, status
-     from public.participants
-     where participant_code = $1 and wechat_openid = $2
+    `select id, collector_code as participant_code, status
+     from ${webCollectorsTable}
+     where collector_code = $1 and extra ->> 'wechat_openid' = $2
      limit 1`,
     [participantCode, openid],
   );
@@ -433,9 +568,9 @@ export async function findParticipantByCodeAndOpenId(
 
 export async function nextParticipantCode(): Promise<string> {
   const row = await dbQueryMaybeOne<{ max_code: number | string | null }>(
-    `select max(participant_code::int) as max_code
-     from public.participants
-     where participant_code ~ '^[0-9]{1,6}$'`,
+    `select max(collector_code::int) as max_code
+     from ${webCollectorsTable}
+     where collector_code ~ '^[0-9]{1,6}$'`,
   );
   const current = normalizeParticipantCodeNumber(row?.max_code);
   const next = (current ?? 0) + 1;
@@ -449,9 +584,9 @@ async function findFirstAvailableParticipantCodeNumber(client: PoolClient): Prom
   const result = await client.query<{ next_code: number | string | null }>(
     `select series.code as next_code
      from generate_series($1, $2) as series(code)
-     left join public.participants p
-       on p.participant_code = lpad(series.code::text, 6, '0')
-     where p.participant_code is null
+     left join ${webCollectorsTable} p
+       on p.collector_code = lpad(series.code::text, 6, '0')
+     where p.collector_code is null
      order by series.code asc
      limit 1`,
     [PARTICIPANT_CODE_MIN, PARTICIPANT_CODE_MAX],
@@ -461,9 +596,9 @@ async function findFirstAvailableParticipantCodeNumber(client: PoolClient): Prom
 
 async function nextParticipantCodeNumberInTransaction(client: PoolClient): Promise<number | null> {
   const result = await client.query<{ max_code: number | string | null }>(
-    `select max(participant_code::int) as max_code
-     from public.participants
-     where participant_code ~ '^[0-9]{1,6}$'`,
+    `select max(collector_code::int) as max_code
+     from ${webCollectorsTable}
+     where collector_code ~ '^[0-9]{1,6}$'`,
   );
   const currentMax = normalizeParticipantCodeNumber(result.rows[0]?.max_code);
 
@@ -507,7 +642,12 @@ export async function createParticipant(params: CreateParticipantInput): Promise
       await client.query(`select pg_advisory_xact_lock($1)`, [PARTICIPANT_CODE_ALLOCATION_LOCK_KEY]);
 
       const existingResult = await client.query(
-        `select * from public.participants where wechat_openid = $1 limit 1`,
+        `select ${participantSelectSql("c", "t")}
+         from ${webCollectorsTable} c
+         left join ${webTeamsTable} t
+           on t.id = c.team_id
+         where c.extra ->> 'wechat_openid' = $1
+         limit 1`,
         [params.wechatOpenid],
       );
       const existingRow = existingResult.rows[0];
@@ -539,28 +679,22 @@ export async function createParticipant(params: CreateParticipantInput): Promise
 
         try {
           const result = await client.query(
-            `insert into public.participants (
-               wechat_openid,
+            `insert into ${webCollectorsTable} (
+               user_id,
                real_name,
                phone,
-               participant_code,
+               collector_code,
                status,
-               consent_confirmed,
-               test_status,
-               formal_status,
                extra
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             returning *`,
+             ) values ($1, $2, $3, $4, $5, $6)
+             returning id`,
             [
-              params.wechatOpenid,
+              params.appUserId ?? null,
               params.realName?.trim() || getDefaultParticipantName(params.wechatOpenid),
               params.phone?.trim() || getDefaultParticipantPhone(),
               participantCode,
               params.status,
-              params.consentConfirmed ?? true,
-              params.testStatus ?? "not_started",
-              params.formalStatus ?? "not_started",
-              params.extra ?? {},
+              buildParticipantExtra(params),
             ],
           );
 
@@ -568,9 +702,20 @@ export async function createParticipant(params: CreateParticipantInput): Promise
             openid: params.wechatOpenid,
             participantCode,
           });
+          const createdRow = (
+            await client.query(
+              `select ${participantSelectSql("c", "t")}
+               from ${webCollectorsTable} c
+               left join ${webTeamsTable} t
+                 on t.id = c.team_id
+               where c.id = $1
+               limit 1`,
+              [parseInteger(result.rows[0].id)],
+            )
+          ).rows[0];
           return {
             status: "created" as const,
-            participant: mapParticipantRow(result.rows[0]),
+            participant: mapParticipantRow(createdRow),
           };
         } catch (error) {
           console.error("[participants] createParticipant:insert_error", {
@@ -621,36 +766,55 @@ export async function insertVideoSubmissionRow(row: VideoSubmissionInsert): Prom
 }> {
   try {
     const inserted = await dbQueryOne(
-      `insert into public.video_submissions (
-         participant_id,
-         participant_code,
+      `insert into ${webVideoSubmissionsTable} (
+         collector_id,
+         user_id,
+         team_id,
+         collector_code,
          source,
          object_key,
-         wechat_media_id,
          file_name,
          size_bytes,
          mime,
          duration_sec,
          user_comment,
-         submission_type,
-         scene,
-         review_status
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       returning *`,
+         review_status,
+         extra
+       )
+       select
+         c.id,
+         c.user_id,
+         c.team_id,
+         c.collector_code,
+         $2,
+         $3,
+         $4,
+         $5,
+         $6,
+         $7,
+         $8,
+         $9,
+         jsonb_strip_nulls(jsonb_build_object(
+           'wechat_media_id', $10::text,
+           'submission_type', $11::text,
+           'scene', $12::text
+         ))
+       from ${webCollectorsTable} c
+       where c.id = $1
+       returning ${videoSubmissionSelectSql("web_video_submissions")}`,
       [
         row.participant_id,
-        row.participant_code,
         row.source,
         row.object_key,
-        row.wechat_media_id ?? null,
         row.file_name ?? null,
         row.size_bytes ?? null,
         row.mime ?? null,
         row.duration_sec ?? null,
         row.user_comment ?? null,
+        row.review_status,
+        row.wechat_media_id ?? null,
         row.submission_type ?? null,
         row.scene ?? null,
-        row.review_status,
       ],
     );
     return { status: "inserted", submission: mapVideoSubmissionRow(inserted) };
@@ -672,16 +836,16 @@ export async function findExistingSubmissionForDedup(params: {
 }): Promise<VideoSubmissionRow | null> {
   const row = params.wechatMediaId
     ? await dbQueryMaybeOne(
-        `select *
-         from public.video_submissions
-         where wechat_media_id = $1
+        `select ${videoSubmissionSelectSql("s")}
+         from ${webVideoSubmissionsTable} s
+         where s.extra ->> 'wechat_media_id' = $1
          limit 1`,
         [params.wechatMediaId],
       )
     : await dbQueryMaybeOne(
-        `select *
-         from public.video_submissions
-         where participant_id = $1 and object_key = $2
+        `select ${videoSubmissionSelectSql("s")}
+         from ${webVideoSubmissionsTable} s
+         where collector_id = $1 and object_key = $2
          limit 1`,
         [params.participantId, params.objectKey],
       );
@@ -694,16 +858,16 @@ export async function listVideoSubmissions(params: {
 }): Promise<VideoSubmissionRow[]> {
   const rows = params.reviewStatus
     ? await dbQuery(
-        `select *
-         from public.video_submissions
+        `select ${videoSubmissionSelectSql("s")}
+         from ${webVideoSubmissionsTable} s
          where review_status = $1
          order by id desc
          limit $2`,
         [params.reviewStatus, params.limit],
       )
     : await dbQuery(
-        `select *
-         from public.video_submissions
+        `select ${videoSubmissionSelectSql("s")}
+         from ${webVideoSubmissionsTable} s
          order by id desc
          limit $1`,
         [params.limit],
@@ -716,9 +880,9 @@ export async function listVideoSubmissionsByParticipantId(
   limit: number,
 ): Promise<VideoSubmissionRow[]> {
   const rows = await dbQuery(
-    `select *
-     from public.video_submissions
-     where participant_id = $1
+    `select ${videoSubmissionSelectSql("s")}
+     from ${webVideoSubmissionsTable} s
+     where collector_id = $1
      order by id desc
      limit $2`,
     [participantId, limit],
@@ -728,7 +892,10 @@ export async function listVideoSubmissionsByParticipantId(
 
 export async function getVideoSubmissionById(id: number): Promise<VideoSubmissionRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.video_submissions where id = $1 limit 1`,
+    `select ${videoSubmissionSelectSql("s")}
+     from ${webVideoSubmissionsTable} s
+     where id = $1
+     limit 1`,
     [id],
   );
   return row ? mapVideoSubmissionRow(row) : null;
@@ -756,10 +923,10 @@ export async function updateVideoSubmissionReview(params: {
   const assignments = patch.map(([column], index) => `${column} = $${index + 1}`);
   const values = patch.map(([, value]) => value);
   const row = await dbQueryMaybeOne(
-    `update public.video_submissions
+    `update ${webVideoSubmissionsTable}
      set ${assignments.join(", ")}
      where id = $${patch.length + 1}
-     returning *`,
+     returning ${videoSubmissionSelectSql("web_video_submissions")}`,
     [...values, params.id],
   );
   return row ? mapVideoSubmissionRow(row) : null;
@@ -772,7 +939,7 @@ async function updateVideoSubmissionStorage(params: {
   mime: string;
 }): Promise<void> {
   await dbQuery(
-    `update public.video_submissions
+    `update ${webVideoSubmissionsTable}
      set object_key = $1,
          size_bytes = $2,
          mime = $3

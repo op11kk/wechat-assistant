@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
 
 import { dbQuery, dbQueryMaybeOne, dbQueryOne } from "@/lib/db";
+import { getWebMvpRelation } from "@/lib/env";
+
+const webCollectorsTable = getWebMvpRelation("web_collectors");
+const webUploadSessionsTable = getWebMvpRelation("web_upload_sessions");
 
 export type UploadedPart = {
   part_number: number;
@@ -73,9 +77,9 @@ function normalizeUploadedParts(value: unknown): UploadedPart[] {
 function mapUploadSessionRow(row: QueryResultRow): UploadSessionRow {
   return {
     id: String(row.id),
-    participant_id: parseInteger(row.participant_id),
-    participant_code: String(row.participant_code),
-    wechat_openid: String(row.wechat_openid),
+    participant_id: parseInteger(row.collector_id ?? row.participant_id),
+    participant_code: String(row.collector_code ?? row.participant_code),
+    wechat_openid: String(row.wechat_openid ?? ""),
     source: "h5",
     object_key: String(row.object_key),
     file_name: row.file_name ? String(row.file_name) : null,
@@ -108,11 +112,12 @@ export async function createUploadSession(params: {
   userComment?: string | null;
 }): Promise<UploadSessionRow> {
   const row = await dbQueryOne(
-    `insert into public.upload_sessions (
+    `insert into ${webUploadSessionsTable} (
        id,
-       participant_id,
-       participant_code,
-       wechat_openid,
+       collector_id,
+       user_id,
+       team_id,
+       collector_code,
        source,
        object_key,
        file_name,
@@ -124,13 +129,30 @@ export async function createUploadSession(params: {
        uploaded_parts,
        status,
        user_comment
-     ) values ($1, $2, $3, $4, 'h5', $5, $6, $7, $8, $9, $10, $11, $12, 'uploading', $13)
+     )
+     select
+       $1,
+       c.id,
+       c.user_id,
+       c.team_id,
+       c.collector_code,
+       'h5',
+       $3,
+       $4,
+       $5,
+       $6,
+       $7,
+       $8,
+       $9,
+       $10,
+       'uploading',
+       $11
+     from ${webCollectorsTable} c
+     where c.id = $2
      returning *`,
     [
       randomUUID(),
       params.participantId,
-      params.participantCode,
-      params.wechatOpenid,
       params.objectKey,
       params.fileName,
       params.sizeBytes,
@@ -147,7 +169,7 @@ export async function createUploadSession(params: {
 
 export async function getUploadSessionById(sessionId: string): Promise<UploadSessionRow | null> {
   const row = await dbQueryMaybeOne(
-    `select * from public.upload_sessions where id = $1 limit 1`,
+    `select * from ${webUploadSessionsTable} where id = $1 limit 1`,
     [sessionId],
   );
   return row ? mapUploadSessionRow(row) : null;
@@ -159,7 +181,7 @@ export async function updateUploadSessionUploadedParts(
 ): Promise<UploadSessionRow> {
   const normalized = normalizeUploadedParts(uploadedParts);
   const row = await dbQueryOne(
-    `update public.upload_sessions
+    `update ${webUploadSessionsTable}
      set uploaded_parts = $1,
          updated_at = now()
      where id = $2
@@ -179,7 +201,7 @@ export async function mergeUploadSessionUploadedPart(
   }
 
   const row = await dbQueryOne(
-    `update public.upload_sessions
+    `update ${webUploadSessionsTable}
      set uploaded_parts = (
            select coalesce(
              jsonb_agg(jsonb_build_object('part_number', part_number, 'etag', etag) order by part_number),
@@ -220,7 +242,7 @@ export async function mergeUploadSessionUploadedParts(
   }
 
   const row = await dbQueryOne(
-    `update public.upload_sessions
+    `update ${webUploadSessionsTable}
      set uploaded_parts = (
            select coalesce(
              jsonb_agg(jsonb_build_object('part_number', part_number, 'etag', etag) order by part_number),
@@ -264,7 +286,7 @@ export async function updateUploadSessionStatus(params: {
   completedAt?: string | null;
 }): Promise<UploadSessionRow> {
   const row = await dbQueryOne(
-    `update public.upload_sessions
+    `update ${webUploadSessionsTable}
      set status = $1,
          error_message = $2,
          completed_at = $3,
@@ -277,5 +299,5 @@ export async function updateUploadSessionStatus(params: {
 }
 
 export async function pingUploadSessionsTable(): Promise<void> {
-  await dbQuery("select 1 from public.upload_sessions limit 1");
+  await dbQuery(`select 1 from ${webUploadSessionsTable} limit 1`);
 }

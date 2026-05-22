@@ -122,13 +122,6 @@ type ParticipantLookupResponse = {
   submissions: SubmissionSummary[];
 };
 
-type LeaderReferralBindResponse = {
-  status: "bound" | "already_bound";
-  participant_code: string;
-  leader_referral: LeaderReferralSummary | null;
-  detail: string | null;
-};
-
 type AccessConfirmState = "idle" | "success" | "invalid" | "network";
 
 const STORAGE_KEY = "h5-multipart-session-v2";
@@ -142,6 +135,17 @@ const MUTATION_RETRY_ATTEMPTS = 3;
 const MIN_PART_UPLOAD_TIMEOUT_MS = 120_000;
 const MOBILE_PART_UPLOAD_TIMEOUT_MS = 360_000;
 const VERY_SLOW_PART_UPLOAD_TIMEOUT_MS = 600_000;
+const LEGAL_AGREEMENT_STORAGE_KEY = "h5-legal-agreement-v2026-05-15";
+const LEGAL_AGREEMENT_SUMMARY = "本次提交内容将用于机器人训练、具身智能算法研发、AI 模型训练等合法合规用途。";
+const LEGAL_AGREEMENT_PARAGRAPHS = [
+  "请您在上传视频或提交数据前仔细阅读本声明。",
+  "您进入本页面并继续注册、领取身份码、接受任务、拍摄、上传或提交数据，即视为您已阅读、理解并同意本声明；如不同意，请立即停止使用并勿提交任何数据。",
+  "您同意，您提交的视频、图片、音频、文字、传感器数据、元数据等资料，可由平台及合作方用于人形机器人训练、具身智能算法研发、AI 模型训练、数据标注、数据分析、产品测试、商业合作及其他合法合规用途。",
+  "您承诺，您提交的数据来源合法、授权完整，不侵犯任何第三方的肖像权、隐私权、个人信息权益、知识产权、商业秘密或其他合法权益，不包含偷拍、偷录、盗取、未经授权或违法违规内容。",
+  "如因您提交的数据存在违法、侵权、未经授权或其他权利瑕疵，导致平台、合作方或第三方遭受投诉、索赔、处罚、诉讼或损失，您应自行承担全部责任，并赔偿平台因此产生的相关损失和费用。",
+  "如您以团长、组织者或代理人身份参与，应确保相关采集员已知悉并同意本声明，并对您组织、管理或提交的数据承担相应责任。",
+  "平台有权对上传数据进行审核、退回、删除、拒收、暂停结算或终止参与资格。点击“我已阅读并同意”，即表示您明确同意并承诺遵守本声明。",
+];
 
 type NetworkInformationLike = {
   downlink?: number;
@@ -349,6 +353,35 @@ function writeStoredSession(session: StoredMultipartSession | null) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 }
 
+function readLegalAgreementAccepted(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(LEGAL_AGREEMENT_STORAGE_KEY) === "accepted";
+  } catch {
+    return false;
+  }
+}
+
+function writeLegalAgreementAccepted(accepted: boolean) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (accepted) {
+      window.localStorage.setItem(LEGAL_AGREEMENT_STORAGE_KEY, "accepted");
+      return;
+    }
+
+    window.localStorage.removeItem(LEGAL_AGREEMENT_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures so uploads can still continue in private browsing modes.
+  }
+}
+
 async function readJsonOrText(response: Response): Promise<unknown> {
   const text = await response.text();
   try {
@@ -482,18 +515,31 @@ async function fetchPresignedPartMap(
     return new Map();
   }
 
-  const response = await fetchJson<BatchPartPresignResponse>("/upload/multipart/part", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      session_id: sessionId,
-      part_numbers: partNumbers,
-    }),
-  });
+  try {
+    const response = await fetchJson<BatchPartPresignResponse>("/upload/multipart/part", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        part_numbers: partNumbers,
+      }),
+    });
 
-  return new Map(response.parts.map((part) => [part.part_number, part]));
+    return new Map(response.parts.map((part) => [part.part_number, part]));
+  } catch (error) {
+    if (!(error instanceof FetchJsonError) || error.status !== 400) {
+      throw error;
+    }
+
+    const parts: PartPresignResponse[] = [];
+    for (const partNumber of partNumbers) {
+      parts.push(await fetchPresignedPart(sessionId, partNumber));
+    }
+
+    return new Map(parts.map((part) => [part.part_number, part]));
+  }
 }
 
 function uploadPartWithProgress(
@@ -549,7 +595,6 @@ export default function H5UploadClient() {
   const searchParams = useSearchParams();
   const openedFromMenu = searchParams.get("from")?.trim() === "menu";
   const [participantCodeInput, setParticipantCodeInput] = useState("");
-  const [leaderPromoCodeInput, setLeaderPromoCodeInput] = useState("");
   const [viewer, setViewer] = useState<ParticipantLookupResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
@@ -562,6 +607,9 @@ export default function H5UploadClient() {
   const [isUploadConfirmed, setIsUploadConfirmed] = useState(false);
   const [storedSession, setStoredSession] = useState<StoredMultipartSession | null>(null);
   const [accessConfirmState, setAccessConfirmState] = useState<AccessConfirmState>("idle");
+  const [isLegalAgreementAccepted, setIsLegalAgreementAccepted] = useState(false);
+  const [isLegalAgreementOpen, setIsLegalAgreementOpen] = useState(false);
+  const [legalAgreementHint, setLegalAgreementHint] = useState<string | null>(null);
   const uploadInFlightRef = useRef(false);
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
@@ -577,6 +625,17 @@ export default function H5UploadClient() {
 
   const clearStoredSession = () => {
     syncStoredSession(null);
+  };
+
+  const openLegalAgreement = () => {
+    setIsLegalAgreementOpen(true);
+  };
+
+  const acceptLegalAgreement = () => {
+    setIsLegalAgreementAccepted(true);
+    setLegalAgreementHint(null);
+    setIsLegalAgreementOpen(false);
+    writeLegalAgreementAccepted(true);
   };
 
   const loadParticipantByCode = async (code: string) => {
@@ -609,14 +668,16 @@ export default function H5UploadClient() {
     }
   };
 
-  const confirmParticipantAccess = async (
-    code: string,
-    options?: {
-      leaderPromoCode?: string;
-    },
-  ) => {
+  const confirmParticipantAccess = async (code: string) => {
+    if (!isLegalAgreementAccepted) {
+      setLegalAgreementHint("继续确认上传码前，请先阅读并同意《数据采集与上传声明》。");
+      setViewerError("继续前请先阅读并同意《数据采集与上传声明》。");
+      setAccessConfirmState("idle");
+      openLegalAgreement();
+      return;
+    }
+
     const normalizedCode = normalizeSixDigitCode(code);
-    const normalizedLeaderPromoCode = normalizeSixDigitCode(options?.leaderPromoCode ?? leaderPromoCodeInput);
 
     if (!normalizedCode) {
       setViewer(null);
@@ -635,41 +696,12 @@ export default function H5UploadClient() {
       );
       fallbackViewer = nextViewer;
 
-      let resolvedViewer = nextViewer;
-      const currentBoundLeaderCode = nextViewer.leader_referral?.promo_code ?? "";
-
-      if (normalizedLeaderPromoCode) {
-        if (currentBoundLeaderCode && currentBoundLeaderCode !== normalizedLeaderPromoCode) {
-          setViewer(nextViewer);
-          setLeaderPromoCodeInput(currentBoundLeaderCode);
-          throw new Error("当前账号已绑定其他团长推广码，暂不支持修改。");
-        }
-
-        if (!currentBoundLeaderCode) {
-          await fetchJson<LeaderReferralBindResponse>("/api/h5/leader-referral/bind", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              participant_code: nextViewer.participant.participant_code,
-              leader_promo_code: normalizedLeaderPromoCode,
-            }),
-          });
-
-          resolvedViewer = await fetchJson<ParticipantLookupResponse>(
-            `/api/h5/code/${encodeURIComponent(normalizedCode)}`,
-          );
-        }
-      }
-
-      setViewer(resolvedViewer);
-      setParticipantCodeInput(resolvedViewer.participant.participant_code);
-      setLeaderPromoCodeInput(resolvedViewer.leader_referral?.promo_code ?? normalizedLeaderPromoCode);
+      setViewer(nextViewer);
+      setParticipantCodeInput(nextViewer.participant.participant_code);
       setAccessConfirmState("success");
-      const nextScene = resolvedViewer.scenes[0]?.name ?? "";
+      const nextScene = nextViewer.scenes[0]?.name ?? "";
       setScene((current) =>
-        current && resolvedViewer.scenes.some((item) => item.name === current) ? current : nextScene,
+        current && nextViewer.scenes.some((item) => item.name === current) ? current : nextScene,
       );
     } catch (error) {
       setViewer(fallbackViewer);
@@ -687,17 +719,11 @@ export default function H5UploadClient() {
 
   useEffect(() => {
     const codeFromQuery = searchParams.get("code")?.trim() ?? "";
-    const leaderPromoCodeFromQuery = normalizeSixDigitCode(
-      searchParams.get("leader")?.trim() ??
-        searchParams.get("promo")?.trim() ??
-        searchParams.get("leaderPromoCode")?.trim() ??
-        "",
-    );
     const nextStored = readStoredSession();
     setStoredSession(nextStored);
+    setIsLegalAgreementAccepted(readLegalAgreementAccepted());
 
     const initialCode = codeFromQuery || nextStored?.participantCode || "";
-    setLeaderPromoCodeInput(leaderPromoCodeFromQuery);
     if (!initialCode) {
       return;
     }
@@ -721,6 +747,36 @@ export default function H5UploadClient() {
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
   }, [isFinalizingUpload, isUploading]);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || !isLegalAgreementOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isLegalAgreementOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !isLegalAgreementOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsLegalAgreementOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isLegalAgreementOpen]);
 
   const resolvedParticipantCode = viewer?.participant.participant_code ?? participantCodeInput.trim();
   const activeUploadKind = viewer?.workflow.current_upload_kind ?? "test";
@@ -757,6 +813,13 @@ export default function H5UploadClient() {
     setProgress(0);
     setIsUploadConfirmed(false);
     setIsFinalizingUpload(false);
+
+    if (!isLegalAgreementAccepted) {
+      setLegalAgreementHint("继续上传视频前，请先阅读并同意《数据采集与上传声明》。");
+      appendLog("error", "继续上传前，请先阅读并同意《数据采集与上传声明》。");
+      openLegalAgreement();
+      return;
+    }
 
     if (!viewer?.participant || !viewer.workflow) {
       appendLog("error", "请先输入上传码并完成验证。");
@@ -919,16 +982,36 @@ export default function H5UploadClient() {
         pendingPersistedParts.clear();
 
         const task = persistSequence.then(async () => {
-          await fetchJson("/upload/multipart/part", {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              session_id: sessionState.session_id,
-              parts: batch,
-            }),
-          });
+          try {
+            await fetchJson("/upload/multipart/part", {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                session_id: sessionState.session_id,
+                parts: batch,
+              }),
+            });
+          } catch (error) {
+            if (!(error instanceof FetchJsonError) || error.status !== 400) {
+              throw error;
+            }
+
+            for (const part of batch) {
+              await fetchJson("/upload/multipart/part", {
+                method: "PATCH",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  session_id: sessionState.session_id,
+                  part_number: part.part_number,
+                  etag: part.etag,
+                }),
+              });
+            }
+          }
 
           sessionSnapshot = {
             ...sessionSnapshot,
@@ -1071,7 +1154,7 @@ export default function H5UploadClient() {
           <div className="feature-lines">
             <p>
               <strong>用途说明：</strong>
-              本次提交内容将用于机器人训练与具身智能算法研发。
+              {LEGAL_AGREEMENT_SUMMARY}
             </p>
             <p>
               <strong>上传前提示：</strong>
@@ -1081,6 +1164,23 @@ export default function H5UploadClient() {
               <strong>审核规则：</strong>
               视频将会审核，审核通过后，管理员将会联系你进行结算。
             </p>
+          </div>
+          <div className="agreement-inline-card">
+            <div className="agreement-inline-header">
+              <div>
+                <strong>数据采集与上传声明</strong>
+                <p>继续确认上传码或上传视频前，请先阅读并同意完整声明。</p>
+              </div>
+              <button className="agreement-link-button" onClick={openLegalAgreement} type="button">
+                {isLegalAgreementAccepted ? "查看完整声明" : "查看并同意"}
+              </button>
+            </div>
+            <p className={`agreement-status-copy ${isLegalAgreementAccepted ? "is-accepted" : "is-pending"}`}>
+              {isLegalAgreementAccepted
+                ? "已阅读并同意《数据采集与上传声明》。如需重新查看，可随时打开完整声明。"
+                : "未完成声明确认，当前无法继续确认上传码或上传视频。"}
+            </p>
+            {legalAgreementHint ? <p className="agreement-inline-hint">{legalAgreementHint}</p> : null}
           </div>
         </div>
 
@@ -1108,37 +1208,12 @@ export default function H5UploadClient() {
               </p>
             </div>
           </div>
-          <div className="field referral-field" style={{ marginTop: 14 }}>
-            <label htmlFor="leaderPromoCodeClean">推荐码(可选)</label>
-            <input
-              id="leaderPromoCodeClean"
-              inputMode="numeric"
-              maxLength={6}
-              value={leaderPromoCodeInput}
-              onChange={(event) => {
-                setLeaderPromoCodeInput(normalizeSixDigitCode(event.target.value));
-                if (!viewer?.leader_referral) {
-                  setAccessConfirmState("idle");
-                  setViewerError(null);
-                }
-              }}
-              placeholder="如有推荐码，请输入 6 位数字"
-              disabled={Boolean(viewer?.leader_referral)}
-            />
-            <p className="field-hint">
-              如果是通过团长渠道开始任务则填写推荐码，若不是则不用填写。
-            </p>
-          </div>
           <div className="submit-row confirm-action-row">
             {!isAccessConfirmed ? (
               <button
                 className="submit-button"
-                disabled={isLookingUp || participantCodeInput.trim().length === 0}
-                onClick={() =>
-                  void confirmParticipantAccess(participantCodeInput, {
-                    leaderPromoCode: leaderPromoCodeInput,
-                  })
-                }
+                disabled={isLookingUp || participantCodeInput.trim().length === 0 || !isLegalAgreementAccepted}
+                onClick={() => void confirmParticipantAccess(participantCodeInput)}
                 type="button"
               >
                 <span style={{ alignItems: "center", display: "inline-flex", gap: 10 }}>
@@ -1246,7 +1321,7 @@ export default function H5UploadClient() {
             <div className="submit-row">
               <button
                 className="submit-button"
-                disabled={isUploading || !canUpload}
+                disabled={isUploading || !canUpload || !isLegalAgreementAccepted}
                 onClick={handleSubmit}
                 type="button"
               >
@@ -1272,6 +1347,53 @@ export default function H5UploadClient() {
             ))}
           </div>
         </section>
+      ) : null}
+      {isLegalAgreementOpen ? (
+        <div
+          aria-hidden="true"
+          className="agreement-modal-backdrop"
+          onClick={() => setIsLegalAgreementOpen(false)}
+        >
+          <div
+            aria-labelledby="legal-agreement-title"
+            aria-modal="true"
+            className="agreement-modal"
+            role="dialog"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="agreement-modal-header">
+              <div>
+                <p className="eyebrow">Legal Notice</p>
+                <h2 id="legal-agreement-title">数据采集与上传声明</h2>
+              </div>
+              <button
+                aria-label="关闭声明弹窗"
+                className="agreement-modal-close"
+                onClick={() => setIsLegalAgreementOpen(false)}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="agreement-modal-body">
+              {LEGAL_AGREEMENT_PARAGRAPHS.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </div>
+            <div className="agreement-modal-footer">
+              <button
+                className="agreement-secondary-button"
+                onClick={() => setIsLegalAgreementOpen(false)}
+                type="button"
+              >
+                稍后再看
+              </button>
+              <button className="submit-button agreement-primary-button" onClick={acceptLegalAgreement} type="button">
+                我已阅读并同意
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
       <style jsx>{`
         @keyframes h5LookupSpin {
@@ -1311,6 +1433,71 @@ export default function H5UploadClient() {
           margin: 0;
         }
 
+        .agreement-inline-card {
+          margin-top: 18px;
+          padding: 18px;
+          border: 1px solid rgba(15, 118, 110, 0.16);
+          border-radius: 20px;
+          background: rgba(255, 255, 255, 0.62);
+        }
+
+        .agreement-inline-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+        }
+
+        .agreement-inline-header strong {
+          display: block;
+          margin-bottom: 6px;
+          color: #16211f;
+        }
+
+        .agreement-inline-header p {
+          margin: 0;
+          color: #52605a;
+          line-height: 1.6;
+        }
+
+        .agreement-link-button,
+        .agreement-secondary-button,
+        .agreement-modal-close {
+          appearance: none;
+          border: 1px solid rgba(22, 33, 31, 0.14);
+          background: rgba(255, 255, 255, 0.9);
+          color: #16211f;
+          font: inherit;
+        }
+
+        .agreement-link-button {
+          flex-shrink: 0;
+          min-height: 44px;
+          padding: 0 16px;
+          border-radius: 999px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .agreement-status-copy,
+        .agreement-inline-hint {
+          margin: 14px 0 0;
+          line-height: 1.6;
+        }
+
+        .agreement-status-copy.is-accepted {
+          color: #1e7f73;
+        }
+
+        .agreement-status-copy.is-pending {
+          color: #9a3412;
+        }
+
+        .agreement-inline-hint {
+          color: #c43c2f;
+          font-weight: 700;
+        }
+
         .confirm-action-row {
           align-items: center;
           gap: 14px;
@@ -1336,6 +1523,119 @@ export default function H5UploadClient() {
 
         .status-chip.error-chip {
           color: #c43c2f;
+        }
+
+        .agreement-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 30;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          padding: 18px;
+          background: rgba(22, 33, 31, 0.48);
+        }
+
+        .agreement-modal {
+          width: min(720px, 100%);
+          max-height: min(78vh, 840px);
+          display: grid;
+          grid-template-rows: auto minmax(0, 1fr) auto;
+          border-radius: 28px;
+          border: 1px solid rgba(22, 33, 31, 0.08);
+          background: #fffdf8;
+          box-shadow: 0 30px 80px rgba(22, 33, 31, 0.25);
+          overflow: hidden;
+        }
+
+        .agreement-modal-header,
+        .agreement-modal-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 14px;
+          align-items: center;
+          padding: 20px 22px;
+          background: rgba(255, 250, 240, 0.95);
+        }
+
+        .agreement-modal-header {
+          border-bottom: 1px solid rgba(22, 33, 31, 0.08);
+        }
+
+        .agreement-modal-header h2 {
+          margin: 0;
+          font-size: clamp(1.3rem, 3vw, 1.8rem);
+        }
+
+        .agreement-modal-close {
+          min-height: 40px;
+          padding: 0 14px;
+          border-radius: 999px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .agreement-modal-body {
+          overflow-y: auto;
+          padding: 22px;
+          display: grid;
+          gap: 14px;
+        }
+
+        .agreement-modal-body p {
+          margin: 0;
+          line-height: 1.8;
+          color: #33403c;
+        }
+
+        .agreement-modal-footer {
+          border-top: 1px solid rgba(22, 33, 31, 0.08);
+          justify-content: flex-end;
+        }
+
+        .agreement-secondary-button,
+        .agreement-primary-button {
+          min-height: 46px;
+          padding: 0 18px;
+          border-radius: 999px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .agreement-secondary-button {
+          background: rgba(255, 255, 255, 0.95);
+        }
+
+        @media (max-width: 760px) {
+          .agreement-inline-header,
+          .agreement-modal-header,
+          .agreement-modal-footer {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .agreement-link-button,
+          .agreement-modal-close,
+          .agreement-secondary-button,
+          .agreement-primary-button {
+            width: 100%;
+          }
+
+          .agreement-modal-backdrop {
+            padding: 12px;
+          }
+
+          .agreement-modal {
+            max-height: 84vh;
+            border-radius: 24px;
+          }
+
+          .agreement-modal-header,
+          .agreement-modal-body,
+          .agreement-modal-footer {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
         }
       `}</style>
     </main>

@@ -3,8 +3,6 @@ const path = require("node:path");
 
 const MENU_CODE_KEY = "MENU_CODE";
 const MENU_UPLOAD_KEY = "MENU_UPLOAD";
-const MENU_GROUP_KEY = "MENU_GROUP";
-const MENU_CONTACT_KEY = "MENU_CONTACT_SERVICE";
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -116,11 +114,6 @@ async function publishMenu() {
         name: "其他",
         sub_button: [
           {
-            type: "click",
-            name: "加入社群",
-            key: MENU_GROUP_KEY,
-          },
-          {
             type: "view",
             name: "项目介绍",
             url: "https://mp.weixin.qq.com/s/kU8HnmvMPWDnVwfxBDQPwA",
@@ -134,11 +127,6 @@ async function publishMenu() {
             type: "view",
             name: "结算规则",
             url: "https://mp.weixin.qq.com/s/FtzGNFfrS3PUWbo2HAswfA",
-          },
-          {
-            type: "click",
-            name: "联系客服",
-            key: MENU_CONTACT_KEY,
           },
         ],
       },

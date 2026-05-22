@@ -25,6 +25,19 @@ const updateDb = args.includes("--update-db");
 const listPath = args.find((arg) => !arg.startsWith("--")) || "/tmp/video_keys.txt";
 const ffprobeBin = readEnv("FFPROBE_BIN", "ffprobe");
 const signedUrlExpiresIn = Number(readEnv("VIDEO_DURATION_SIGNED_URL_EXPIRES_IN", "3600"));
+const webMvpSchema = normalizePgIdentifier(readEnv("WEB_MVP_SCHEMA", "web_mvp"), "WEB_MVP_SCHEMA");
+const videoSubmissionsTable = pgRelation("web_video_submissions");
+
+function normalizePgIdentifier(value, label) {
+  if (/^[a-z_][a-z0-9_]*$/i.test(value)) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function pgRelation(tableName) {
+  return `${webMvpSchema}.${normalizePgIdentifier(tableName, "table name")}`;
+}
 
 const storageClient = new S3Client({
   region: requireEnv("COS_REGION"),
@@ -71,7 +84,7 @@ async function probeDurationSeconds(objectKey) {
 
 async function updateDuration(pool, objectKey, durationSeconds) {
   await pool.query(
-    `update public.video_submissions
+    `update ${videoSubmissionsTable}
      set duration_sec = $1
      where object_key = $2`,
     [durationSeconds, objectKey],
