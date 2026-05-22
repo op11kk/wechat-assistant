@@ -1131,10 +1131,6 @@ export default function H5UploadClient() {
               <strong>审核规则：</strong>
               视频将会审核，审核通过后，管理员将会联系你进行结算。
             </p>
-            <p>
-              <strong>打款周期：</strong>
-              16:00前上传，当日17:00准时打款；16:00后上传，次日17:00统一结算。
-            </p>
           </div>
           <div className="agreement-inline-card">
             <div className="agreement-inline-header">
