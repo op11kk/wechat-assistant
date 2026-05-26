@@ -321,6 +321,19 @@ export async function findParticipantByCode(participantCode: string): Promise<Pa
   return row ? mapParticipantRow(row) : null;
 }
 
+export async function findParticipantByAppUserId(appUserId: number): Promise<ParticipantRow | null> {
+  const row = await dbQueryMaybeOne(
+    `select ${participantSelectSql("c", "t")}
+     from ${webCollectorsTable} c
+     left join ${webTeamsTable} t
+       on t.id = c.team_id
+     where c.user_id = $1
+     limit 1`,
+    [appUserId],
+  );
+  return row ? mapParticipantRow(row) : null;
+}
+
 export async function findParticipantById(participantId: number): Promise<ParticipantRow | null> {
   const row = await dbQueryMaybeOne(
     `select ${participantSelectSql("c", "t")}

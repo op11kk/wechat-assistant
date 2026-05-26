@@ -17,7 +17,7 @@ export default function LogoutButton({ className = "secondary-link" }: LogoutBut
         method: "POST",
       });
     } finally {
-      window.location.href = "/login";
+      window.location.href = "/";
     }
   }
 

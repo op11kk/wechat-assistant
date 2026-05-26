@@ -79,6 +79,7 @@ export default function LeaderManageClient({ collectors }: { collectors: Domesti
         phone: formValue(form, "phone"),
         real_name: formValue(form, "real_name"),
         collector_code: formValue(form, "collector_code"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -91,6 +92,7 @@ export default function LeaderManageClient({ collectors }: { collectors: Domesti
         phone: formValue(form, "phone"),
         real_name: formValue(form, "real_name"),
         status: formValue(form, "status"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -124,6 +126,10 @@ export default function LeaderManageClient({ collectors }: { collectors: Domesti
         <div className="field">
           <label htmlFor="leaderCollectorCode">采集员编号</label>
           <input id="leaderCollectorCode" name="collector_code" inputMode="numeric" maxLength={6} placeholder="留空自动生成" />
+        </div>
+        <div className="field">
+          <label htmlFor="leaderCollectorPassword">初始密码</label>
+          <input id="leaderCollectorPassword" name="password" type="password" minLength={6} placeholder="至少 6 位" />
         </div>
         <div className="field">
           <label>&nbsp;</label>
@@ -167,6 +173,7 @@ export default function LeaderManageClient({ collectors }: { collectors: Domesti
                   <form className="inline-edit-form leader-collector-edit-form" onSubmit={(event) => updateCollector(event, collector.participantId)}>
                     <input name="real_name" defaultValue={collector.realName} placeholder="姓名" />
                     <input name="phone" defaultValue={collector.phone} placeholder="手机号" />
+                    <input name="password" type="password" minLength={6} placeholder="新密码" />
                     <select name="status" defaultValue={collector.status}>
                       <option value="active">active</option>
                       <option value="paused">paused</option>

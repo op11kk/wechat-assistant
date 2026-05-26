@@ -2,10 +2,13 @@ import { NextRequest } from "next/server";
 
 import {
   attachAppSessionCookie,
+  bindWechatIdentityToExistingAccount,
+  clearWechatPendingCookie,
   createAppSession,
   mapAuthSetupError,
-  registerCollectorAccount,
-  registerCollectorByCode,
+  parseWechatPendingToken,
+  registerCollectorWithWechatIdentity,
+  WECHAT_PENDING_COOKIE,
 } from "@/lib/app-auth";
 import { jsonResponse } from "@/lib/http";
 
@@ -17,30 +20,35 @@ function getClientIp(request: NextRequest): string | null {
 }
 
 export async function POST(request: NextRequest) {
+  const identity = parseWechatPendingToken(request.cookies.get(WECHAT_PENDING_COOKIE)?.value);
+  if (!identity) {
+    return jsonResponse({ ok: false, error: "wechat_pending_expired", detail: "微信授权已过期，请重新授权登录。" }, 401);
+  }
+
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {
     return jsonResponse({ ok: false, error: "invalid_body", detail: "Invalid JSON body" }, 400);
   }
 
-  const code = String(body.code ?? "").trim();
   try {
-    const result = code
-      ? await registerCollectorByCode({
-          phone: String(body.phone ?? ""),
-          code,
-          teamCode: String(body.team_code ?? body.leader_code ?? ""),
-          displayName: body.display_name == null ? null : String(body.display_name),
-          realName: body.real_name == null ? null : String(body.real_name),
-          agreementAccepted: body.agreement_accepted === true,
-        })
-      : await registerCollectorAccount({
-          phone: String(body.phone ?? ""),
-          password: String(body.password ?? ""),
-          teamCode: String(body.team_code ?? body.leader_code ?? ""),
-          displayName: body.display_name == null ? null : String(body.display_name),
-          realName: body.real_name == null ? null : String(body.real_name),
-          agreementAccepted: body.agreement_accepted === true,
-        });
+    const bindMode = String(body.bind_mode ?? body.mode ?? "collector_signup");
+    const result =
+      bindMode === "existing_account"
+        ? await bindWechatIdentityToExistingAccount({
+            identity,
+            phone: String(body.phone ?? ""),
+            password: String(body.password ?? ""),
+            agreementAccepted: body.agreement_accepted === true,
+          })
+        : await registerCollectorWithWechatIdentity({
+            identity,
+            teamCode: String(body.team_code ?? body.leader_code ?? ""),
+            phone: body.phone == null ? null : String(body.phone),
+            password: body.password == null ? null : String(body.password),
+            displayName: body.display_name == null ? null : String(body.display_name),
+            realName: body.real_name == null ? null : String(body.real_name),
+            agreementAccepted: body.agreement_accepted === true,
+          });
 
     if (!result.ok) {
       return jsonResponse(result, 400);
@@ -61,6 +69,7 @@ export async function POST(request: NextRequest) {
       201,
     );
 
+    clearWechatPendingCookie(response);
     return attachAppSessionCookie(response, session.token, session.expiresAt);
   } catch (error) {
     const setupError = mapAuthSetupError(error);

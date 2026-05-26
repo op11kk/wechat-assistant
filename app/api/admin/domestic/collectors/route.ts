@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
     leaderId,
     status: body.status == null ? "active" : String(body.status),
     actorUserId: auth.user.id,
+    password: body.password == null ? null : String(body.password),
   });
 
   if (result.ok) {

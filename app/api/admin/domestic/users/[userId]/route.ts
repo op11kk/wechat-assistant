@@ -38,6 +38,7 @@ export async function PATCH(request: NextRequest, context: Params) {
     status: String(body.status ?? ""),
     displayName: body.display_name == null ? null : String(body.display_name),
     realName: body.real_name == null ? null : String(body.real_name),
+    password: body.password == null ? null : String(body.password),
   });
 
   if (result.ok) {

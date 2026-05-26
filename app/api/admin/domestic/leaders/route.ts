@@ -23,6 +23,7 @@ export async function POST(request: NextRequest) {
     promoCode: String(body.promo_code ?? ""),
     status: String(body.status ?? "active"),
     note: body.note == null ? null : String(body.note),
+    password: body.password == null ? null : String(body.password),
   });
 
   if (result.ok) {

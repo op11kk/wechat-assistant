@@ -49,6 +49,13 @@ function formValue(form: FormData, name: string): string {
   return String(form.get(name) ?? "").trim();
 }
 
+function shortWechatSubject(value: string): string {
+  if (value.length <= 18) {
+    return value;
+  }
+  return `${value.slice(0, 8)}...${value.slice(-6)}`;
+}
+
 export default function AdminManageClient({ data }: { data: DomesticManageData }) {
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -81,6 +88,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
         promo_code: formValue(form, "promo_code"),
         status: formValue(form, "status") || "active",
         note: formValue(form, "note"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -95,6 +103,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
         collector_code: formValue(form, "collector_code"),
         leader_id: formValue(form, "leader_id"),
         status: formValue(form, "status") || "active",
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -108,6 +117,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
         status: formValue(form, "status"),
         display_name: formValue(form, "display_name"),
         real_name: formValue(form, "real_name"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -129,6 +139,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
         promo_code: formValue(form, "promo_code"),
         status: formValue(form, "status"),
         note: formValue(form, "note"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -150,6 +161,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
         phone: formValue(form, "phone"),
         status: formValue(form, "status"),
         leader_id: formValue(form, "leader_id"),
+        password: formValue(form, "password"),
       }),
     );
   }
@@ -159,6 +171,48 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
       return;
     }
     void runAction(() => requestJson(`/api/admin/domestic/collectors/${participantId}`, "DELETE"));
+  }
+
+  function getWechatIdentities(userId: number | null) {
+    if (!userId) {
+      return [];
+    }
+    return data.users.find((user) => user.id === userId)?.wechatIdentities ?? [];
+  }
+
+  function unbindWechatIdentity(identityId: number) {
+    if (!window.confirm("确认解绑这个微信？解绑后这个微信需要重新授权绑定账号。")) {
+      return;
+    }
+    void runAction(() => requestJson(`/api/admin/domestic/wechat-identities/${identityId}`, "DELETE"));
+  }
+
+  function renderWechatIdentities(userId: number | null) {
+    const identities = getWechatIdentities(userId);
+    if (identities.length === 0) {
+      return <span className="muted">未绑定</span>;
+    }
+
+    return (
+      <div className="wechat-identity-list">
+        {identities.map((identity) => (
+          <div className="wechat-identity-row" key={identity.id}>
+            <span title={identity.providerSubject}>
+              微信 {identity.nickname ? `${identity.nickname} / ` : ""}
+              {shortWechatSubject(identity.providerSubject)}
+            </span>
+            <button
+              className="secondary-link inline-action danger-link wechat-unbind-button"
+              disabled={submitting}
+              onClick={() => unbindWechatIdentity(identity.id)}
+              type="button"
+            >
+              解绑
+            </button>
+          </div>
+        ))}
+      </div>
+    );
   }
 
   return (
@@ -198,6 +252,10 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                 <option value="disabled">disabled</option>
               </select>
             </div>
+            <div className="field">
+              <label htmlFor="leaderPassword">初始密码</label>
+              <input id="leaderPassword" name="password" type="password" minLength={6} placeholder="至少 6 位" />
+            </div>
             <div className="field field-full">
               <label htmlFor="leaderNote">备注</label>
               <input id="leaderNote" name="note" placeholder="可选" />
@@ -232,6 +290,10 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                 <option value="paused">paused</option>
                 <option value="withdrawn">withdrawn</option>
               </select>
+            </div>
+            <div className="field">
+              <label htmlFor="collectorPassword">初始密码</label>
+              <input id="collectorPassword" name="password" type="password" minLength={6} placeholder="至少 6 位" />
             </div>
             <div className="field field-full">
               <label htmlFor="collectorLeader">所属团长</label>
@@ -272,6 +334,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                 <th>手机号</th>
                 <th>状态</th>
                 <th>账号</th>
+                <th>微信</th>
                 <th>团长</th>
                 <th>上传数</th>
                 <th>最近上传</th>
@@ -287,6 +350,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                   <td>{collector.phone}</td>
                   <td>{collector.status}</td>
                   <td>{collector.appUserPhone ?? "-"} / {collector.accountStatus ?? "-"}</td>
+                  <td>{renderWechatIdentities(collector.appUserId)}</td>
                   <td>{collector.leaderName ?? "未绑定"} {collector.leaderPromoCode ? `/${collector.leaderPromoCode}` : ""}</td>
                   <td>{collector.submissionCount}</td>
                   <td>{formatDateTime(collector.latestSubmittedAt)}</td>
@@ -295,6 +359,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                       <input name="collector_code" defaultValue={collector.participantCode} placeholder="编号" />
                       <input name="real_name" defaultValue={collector.realName} placeholder="姓名" />
                       <input name="phone" defaultValue={collector.phone} placeholder="手机号" />
+                      <input name="password" type="password" minLength={6} placeholder="新密码" />
                       <select name="status" defaultValue={collector.status}>
                         <option value="active">active</option>
                         <option value="paused">paused</option>
@@ -346,6 +411,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                 <th>团队码</th>
                 <th>手机号</th>
                 <th>状态</th>
+                <th>微信</th>
                 <th>采集员</th>
                 <th>操作</th>
               </tr>
@@ -358,6 +424,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                   <td>{leader.promoCode}</td>
                   <td>{leader.appUserPhone ?? "-"}</td>
                   <td>{leader.status}</td>
+                  <td>{renderWechatIdentities(leader.appUserId)}</td>
                   <td>{leader.participantCount}</td>
                   <td>
                     <form className="inline-edit-form leader-edit-form" onSubmit={(event) => updateLeader(event, leader.leaderId)}>
@@ -369,6 +436,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                         <option value="disabled">disabled</option>
                       </select>
                       <input name="note" defaultValue={leader.note ?? ""} placeholder="备注" />
+                      <input name="password" type="password" minLength={6} placeholder="新密码" />
                       <button className="secondary-link inline-action" disabled={submitting} type="submit">
                         保存
                       </button>
@@ -408,6 +476,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                 <th>状态</th>
                 <th>显示名</th>
                 <th>实名</th>
+                <th>微信</th>
                 <th>最近登录</th>
                 <th>操作</th>
               </tr>
@@ -421,6 +490,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                   <td>{user.status}</td>
                   <td>{user.displayName ?? "-"}</td>
                   <td>{user.realName ?? "-"}</td>
+                  <td>{renderWechatIdentities(user.id)}</td>
                   <td>{formatDateTime(user.lastLoginAt)}</td>
                   <td>
                     <form className="inline-edit-form user-edit-form" onSubmit={(event) => updateUser(event, user.id)}>
@@ -436,6 +506,7 @@ export default function AdminManageClient({ data }: { data: DomesticManageData }
                       </select>
                       <input name="display_name" defaultValue={user.displayName ?? ""} placeholder="显示名" />
                       <input name="real_name" defaultValue={user.realName ?? ""} placeholder="实名" />
+                      <input name="password" type="password" minLength={6} placeholder="新密码" />
                       <button className="secondary-link inline-action" disabled={submitting} type="submit">
                         保存
                       </button>

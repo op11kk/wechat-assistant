@@ -50,6 +50,7 @@ export async function PATCH(request: NextRequest, context: Params) {
     phone: body.phone == null ? null : String(body.phone),
     collectorCode: body.collector_code == null ? null : String(body.collector_code),
     actorUserId: auth.user.id,
+    password: body.password == null ? null : String(body.password),
   });
 
   if (result.ok) {

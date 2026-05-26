@@ -11,6 +11,10 @@ type LogLine = {
   text: string;
 };
 
+type H5UploadClientProps = {
+  initialParticipantCode?: string;
+};
+
 type MultipartInitResponse = {
   session_id: string;
   participant_code: string;
@@ -591,7 +595,7 @@ function uploadPartWithProgress(
 }
 
 
-export default function H5UploadClient() {
+export default function H5UploadClient({ initialParticipantCode = "" }: H5UploadClientProps) {
   const searchParams = useSearchParams();
   const openedFromMenu = searchParams.get("from")?.trim() === "menu";
   const [participantCodeInput, setParticipantCodeInput] = useState("");
@@ -723,14 +727,14 @@ export default function H5UploadClient() {
     setStoredSession(nextStored);
     setIsLegalAgreementAccepted(readLegalAgreementAccepted());
 
-    const initialCode = codeFromQuery || nextStored?.participantCode || "";
+    const initialCode = codeFromQuery || initialParticipantCode || nextStored?.participantCode || "";
     if (!initialCode) {
       return;
     }
 
     setParticipantCodeInput(initialCode);
     void loadParticipantByCode(initialCode);
-  }, [searchParams]);
+  }, [initialParticipantCode, searchParams]);
 
   useEffect(() => {
     if (typeof window === "undefined" || (!isUploading && !isFinalizingUpload)) {
@@ -1204,7 +1208,7 @@ export default function H5UploadClient() {
               <p className="field-hint">
                 {openedFromMenu
                   ? "如果没有自动带入身份码，请回到公众号点击【我的身份码】复制 6 位身份码后再回来输入。"
-                  : "如果你是从公众号链接进入，系统通常会自动带入身份码。"}
+                  : "如果你已登录采集员账号，系统会自动带入身份码；也可以手动输入。"}
               </p>
             </div>
           </div>
@@ -1436,7 +1440,7 @@ export default function H5UploadClient() {
         .agreement-inline-card {
           margin-top: 18px;
           padding: 18px;
-          border: 1px solid rgba(15, 118, 110, 0.16);
+          border: 1px solid rgba(82, 132, 255, 0.24);
           border-radius: 20px;
           background: rgba(255, 255, 255, 0.62);
         }
@@ -1543,7 +1547,7 @@ export default function H5UploadClient() {
           grid-template-rows: auto minmax(0, 1fr) auto;
           border-radius: 28px;
           border: 1px solid rgba(22, 33, 31, 0.08);
-          background: #fffdf8;
+          background: #ffffff;
           box-shadow: 0 30px 80px rgba(22, 33, 31, 0.25);
           overflow: hidden;
         }
@@ -1555,7 +1559,7 @@ export default function H5UploadClient() {
           gap: 14px;
           align-items: center;
           padding: 20px 22px;
-          background: rgba(255, 250, 240, 0.95);
+          background: #f7f8fb;
         }
 
         .agreement-modal-header {
@@ -1564,7 +1568,7 @@ export default function H5UploadClient() {
 
         .agreement-modal-header h2 {
           margin: 0;
-          font-size: clamp(1.3rem, 3vw, 1.8rem);
+          font-size: 1.8rem;
         }
 
         .agreement-modal-close {

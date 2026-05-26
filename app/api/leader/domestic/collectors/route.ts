@@ -22,6 +22,7 @@ export async function POST(request: NextRequest) {
     phone: String(body.phone ?? ""),
     realName: String(body.real_name ?? ""),
     collectorCode: body.collector_code == null ? null : String(body.collector_code),
+    password: body.password == null ? null : String(body.password),
   });
 
   return jsonResponse(result, result.ok ? 200 : 400);

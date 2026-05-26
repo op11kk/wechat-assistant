@@ -27,6 +27,30 @@ CREATE TABLE IF NOT EXISTS web_mvp.web_users (
 CREATE INDEX IF NOT EXISTS idx_web_users_role_status
   ON web_mvp.web_users (role, status);
 
+CREATE TABLE IF NOT EXISTS web_mvp.web_user_identities (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES web_mvp.web_users (id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  appid TEXT NOT NULL,
+  provider_subject TEXT NOT NULL,
+  unionid TEXT,
+  nickname TEXT,
+  avatar_url TEXT,
+  extra JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT web_user_identities_provider_chk CHECK (provider IN ('wechat')),
+  CONSTRAINT web_user_identities_subject_chk CHECK (provider_subject <> ''),
+  CONSTRAINT web_user_identities_provider_subject_key UNIQUE (provider, appid, provider_subject)
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_user_identities_user_id
+  ON web_mvp.web_user_identities (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_web_user_identities_unionid
+  ON web_mvp.web_user_identities (provider, unionid)
+  WHERE unionid IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS web_mvp.web_phone_verification_codes (
   id BIGSERIAL PRIMARY KEY,
   phone TEXT NOT NULL,
@@ -401,6 +425,7 @@ CREATE INDEX IF NOT EXISTS idx_web_admin_audit_logs_target
   ON web_mvp.web_admin_audit_logs (target_type, target_id, created_at DESC);
 
 COMMENT ON TABLE web_mvp.web_users IS 'Web three-portal users for admin, leader, and collector roles.';
+COMMENT ON TABLE web_mvp.web_user_identities IS 'External login identities such as WeChat openid, linked to web_users.';
 COMMENT ON TABLE web_mvp.web_teams IS 'Web teams owned by leaders. team_code is the Web-side leader invitation code.';
 COMMENT ON TABLE web_mvp.web_collectors IS 'Web collectors, independent from old WeChat participants.';
 COMMENT ON TABLE web_mvp.web_team_bind_logs IS 'Immutable history for collector-team code bindings.';
