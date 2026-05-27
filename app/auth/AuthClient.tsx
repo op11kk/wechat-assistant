@@ -250,18 +250,20 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
             <h2>手机号登录</h2>
           </div>
 
-          <div className="auth-toggle auth-gateway-toggle">
+          <div className="auth-toggle auth-gateway-toggle" aria-label="登录或注册">
             <span className="primary-link">登录</span>
             <Link className="secondary-link" href="/register">
               没有账号，去注册
             </Link>
           </div>
 
-          <a className="secondary-link auth-gateway-wechat" href={wechatStartHref}>
-            微信进入 / 授权
-          </a>
-          <div className="auth-divider">
-            <span>或使用手机号密码</span>
+          <div className="auth-method-stack">
+            <a className="secondary-link auth-gateway-wechat" href={wechatStartHref}>
+              微信进入 / 授权
+            </a>
+            <div className="auth-divider">
+              <span>或使用手机号密码</span>
+            </div>
           </div>
 
           <form className="auth-gateway-form" onSubmit={handleSubmit}>
@@ -289,7 +291,7 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
               />
             </div>
 
-            <div className="auth-compact-agreement">
+            <label className="auth-compact-agreement">
               <input
                 checked={agreementAccepted}
                 onChange={(event) => handleAgreementToggle(event.target.checked)}
@@ -301,7 +303,7 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
                   《{legalDeclarationTitle}》
                 </button>
               </span>
-            </div>
+            </label>
 
             <button className="submit-button auth-gateway-submit" disabled={submitting} type="submit">
               {submitting ? "提交中..." : "登录"}
@@ -329,14 +331,14 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
 
       <section className="upload-panel auth-panel">
         {lockMode ? (
-          <div className="auth-toggle">
+          <div className="auth-toggle auth-panel-toggle">
             <span className="primary-link">{mode === "register" ? "注册" : "登录"}</span>
             <Link className="secondary-link" href={mode === "register" ? "/" : "/register"}>
               {mode === "register" ? "已有账号，去登录" : "没有账号，去注册"}
             </Link>
           </div>
         ) : (
-          <div className="auth-toggle">
+          <div className="auth-toggle auth-panel-toggle">
             <button
               className={mode === "register" ? "primary-link" : "secondary-link"}
               onClick={() => setMode("register")}
@@ -390,7 +392,10 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
               </div>
 
               <div className="field">
-                <label htmlFor="teamCode">团长码</label>
+                <label className="label-with-hint" htmlFor="teamCode">
+                  团长码
+                  <span>找邀请你参与采集的人领取</span>
+                </label>
                 <input
                   id="teamCode"
                   inputMode="numeric"
@@ -399,6 +404,7 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
                   value={teamCode}
                   onChange={(event) => setTeamCode(event.target.value)}
                 />
+                <p className="field-hint">如果你是第一次来平台，这个码通常由你的团长、组织者或项目负责人提供。</p>
               </div>
             </>
           ) : null}

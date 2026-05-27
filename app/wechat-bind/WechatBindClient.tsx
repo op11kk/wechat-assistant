@@ -209,7 +209,10 @@ export default function WechatBindClient({ initialTeamCode = "", openidPreview }
               </div>
 
               <div className="field">
-                <label htmlFor="teamCode">团长码</label>
+                <label className="label-with-hint" htmlFor="teamCode">
+                  团长码
+                  <span>找邀请你参与采集的人领取</span>
+                </label>
                 <input
                   id="teamCode"
                   inputMode="numeric"
@@ -218,6 +221,7 @@ export default function WechatBindClient({ initialTeamCode = "", openidPreview }
                   value={teamCode}
                   onChange={(event) => setTeamCode(event.target.value)}
                 />
+                <p className="field-hint">如果你是第一次来平台，这个码通常由你的团长、组织者或项目负责人提供。</p>
               </div>
 
               <div className="field">
