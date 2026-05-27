@@ -221,7 +221,9 @@ export default function WechatBindClient({ initialTeamCode = "", openidPreview }
                   value={teamCode}
                   onChange={(event) => setTeamCode(event.target.value)}
                 />
-                <p className="field-hint">如果你是第一次来平台，这个码通常由你的团长、组织者或项目负责人提供。</p>
+                <p className="field-hint team-code-hint">
+                  团长码就是 6 位邀请码。第一次来平台时，请向邀请你参加采集的人、组织者或项目负责人索要。
+                </p>
               </div>
 
               <div className="field">

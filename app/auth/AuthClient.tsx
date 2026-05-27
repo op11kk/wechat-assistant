@@ -247,7 +247,8 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
         <section className="auth-gateway-card">
           <div className="auth-card-header">
             <p className="eyebrow">Login</p>
-            <h2>手机号登录</h2>
+            <h2>统一登录</h2>
+            <p className="auth-card-subcopy">微信授权或手机号密码登录，系统会按账号角色自动进入采集员端、团长端或管理端。</p>
           </div>
 
           <div className="auth-toggle auth-gateway-toggle" aria-label="登录或注册">
@@ -261,6 +262,7 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
             <a className="secondary-link auth-gateway-wechat" href={wechatStartHref}>
               微信进入 / 授权
             </a>
+            <p className="auth-method-note">首次微信进入会选择身份；绑定后同一个微信会直接进入对应端。</p>
             <div className="auth-divider">
               <span>或使用手机号密码</span>
             </div>
@@ -404,7 +406,9 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
                   value={teamCode}
                   onChange={(event) => setTeamCode(event.target.value)}
                 />
-                <p className="field-hint">如果你是第一次来平台，这个码通常由你的团长、组织者或项目负责人提供。</p>
+                <p className="field-hint team-code-hint">
+                  团长码就是 6 位邀请码。第一次来平台时，请向邀请你参加采集的人、组织者或项目负责人索要。
+                </p>
               </div>
             </>
           ) : null}

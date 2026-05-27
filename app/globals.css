@@ -444,6 +444,7 @@ a {
 
 .auth-gateway-card {
   position: relative;
+  overflow: hidden;
   padding: 36px 38px 38px;
   border: 1px solid rgba(22, 33, 31, 0.12);
   border-radius: 28px;
@@ -453,9 +454,19 @@ a {
     inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
+.auth-gateway-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 5px;
+  background: var(--ink);
+}
+
 .auth-card-header {
   display: grid;
   gap: 12px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid rgba(5, 5, 5, 0.08);
 }
 
 .auth-card-header h2 {
@@ -464,8 +475,24 @@ a {
   line-height: 1.08;
 }
 
+.auth-card-subcopy {
+  max-width: 32rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 650;
+  line-height: 1.7;
+}
+
 .auth-gateway-toggle {
-  margin-top: 26px;
+  display: grid;
+  grid-template-columns: 0.75fr 1.25fr;
+  gap: 6px;
+  margin-top: 24px;
+  padding: 6px;
+  border: 1px solid rgba(5, 5, 5, 0.1);
+  border-radius: 24px;
+  background: #f6f6f4;
 }
 
 .auth-gateway-toggle .primary-link,
@@ -478,10 +505,25 @@ a {
   padding: 0 22px;
 }
 
+.auth-gateway-toggle .primary-link,
+.auth-gateway-toggle .secondary-link {
+  width: 100%;
+  border-radius: 18px;
+}
+
+.auth-gateway-toggle .secondary-link {
+  border-color: transparent;
+  background: transparent;
+}
+
 .auth-method-stack {
   display: grid;
-  gap: 14px;
-  margin-top: 20px;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid rgba(5, 5, 5, 0.1);
+  border-radius: 22px;
+  background: linear-gradient(180deg, #ffffff 0%, #f7f7f5 100%);
 }
 
 .auth-gateway-wechat {
@@ -492,6 +534,15 @@ a {
   background: #f7f7f5;
   color: var(--ink);
   font-weight: 800;
+}
+
+.auth-method-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+  line-height: 1.55;
+  text-align: center;
 }
 
 .auth-side-channel {
@@ -562,6 +613,10 @@ a {
   display: flex;
   align-items: flex-start;
   gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(5, 5, 5, 0.1);
+  border-radius: 18px;
+  background: #fafafa;
   color: var(--muted);
   font-size: 0.94rem;
   font-weight: 700;
@@ -585,6 +640,7 @@ a {
   min-height: 58px;
   margin-top: 2px;
   font-size: 1.02rem;
+  box-shadow: 0 14px 30px rgba(5, 5, 5, 0.16);
 }
 
 .auth-gateway-message {
@@ -1020,6 +1076,16 @@ a {
   margin: 0;
   font-size: 0.84rem;
   color: var(--muted);
+}
+
+.team-code-hint {
+  padding: 12px 14px;
+  border: 1px solid rgba(82, 132, 255, 0.22);
+  border-radius: 14px;
+  background: rgba(82, 132, 255, 0.08);
+  color: #254fb6;
+  font-weight: 700;
+  line-height: 1.65;
 }
 
 .quota-warning {
