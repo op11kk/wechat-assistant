@@ -7,6 +7,7 @@ import { legalDeclarationParagraphs, legalDeclarationTitle } from "@/lib/legal-d
 
 type Mode = "login" | "register";
 type AppRole = "admin" | "leader" | "collector";
+type LoginMethod = "phone" | "wechat";
 
 type AuthResponse = {
   ok: boolean;
@@ -85,6 +86,7 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
   const [agreementDialogOpen, setAgreementDialogOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [loginMethod, setLoginMethod] = useState<LoginMethod>("phone");
 
   const agreementHint = useMemo(() => {
     if (mode === "register") {
@@ -247,70 +249,92 @@ export default function AuthClient({ initialMode = "register", lockMode = false,
         <section className="auth-gateway-card">
           <div className="auth-card-header">
             <p className="eyebrow">Login</p>
-            <h2>统一登录</h2>
-            <p className="auth-card-subcopy">微信授权或手机号密码登录，系统会按账号角色自动进入采集员端、团长端或管理端。</p>
+            <h2>{loginMethod === "phone" ? "手机号登录" : "微信授权登录"}</h2>
+            <p className="auth-card-subcopy">
+              {loginMethod === "phone"
+                ? "默认使用手机号和密码登录，系统会按账号角色自动进入采集员端、团长端或管理端。"
+                : "首次微信进入会选择身份；绑定后同一个微信会直接进入对应端。"}
+            </p>
           </div>
 
-          <div className="auth-toggle auth-gateway-toggle" aria-label="登录或注册">
-            <span className="primary-link">登录</span>
-            <Link className="secondary-link" href="/register">
-              没有账号，去注册
-            </Link>
-          </div>
-
-          <div className="auth-method-stack">
-            <a className="secondary-link auth-gateway-wechat" href={wechatStartHref}>
-              微信进入 / 授权
-            </a>
-            <p className="auth-method-note">首次微信进入会选择身份；绑定后同一个微信会直接进入对应端。</p>
-            <div className="auth-divider">
-              <span>或使用手机号密码</span>
-            </div>
-          </div>
-
-          <form className="auth-gateway-form" onSubmit={handleSubmit}>
-            <div className="field">
-              <label htmlFor="phone">手机号</label>
-              <input
-                id="phone"
-                inputMode="numeric"
-                maxLength={11}
-                placeholder="请输入 11 位大陆手机号"
-                value={phone}
-                onChange={(event) => setPhone(event.target.value)}
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="password">密码</label>
-              <input
-                id="password"
-                minLength={6}
-                placeholder="请输入密码"
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </div>
-
-            <label className="auth-compact-agreement">
-              <input
-                checked={agreementAccepted}
-                onChange={(event) => handleAgreementToggle(event.target.checked)}
-                type="checkbox"
-              />
-              <span>
-                我已阅读并同意
-                <button className="agreement-text-button" onClick={() => setAgreementDialogOpen(true)} type="button">
-                  《{legalDeclarationTitle}》
-                </button>
-              </span>
-            </label>
-
-            <button className="submit-button auth-gateway-submit" disabled={submitting} type="submit">
-              {submitting ? "提交中..." : "登录"}
+          <div className="auth-method-tabs" aria-label="选择登录方式">
+            <button
+              className={loginMethod === "phone" ? "auth-method-tab is-active" : "auth-method-tab"}
+              onClick={() => setLoginMethod("phone")}
+              type="button"
+            >
+              手机号登录
             </button>
-          </form>
+            <button
+              className={loginMethod === "wechat" ? "auth-method-tab is-active" : "auth-method-tab"}
+              onClick={() => setLoginMethod("wechat")}
+              type="button"
+            >
+              微信登录
+            </button>
+          </div>
+
+          {loginMethod === "wechat" ? (
+            <div className="auth-method-stack">
+              <a className="secondary-link auth-gateway-wechat" href={wechatStartHref}>
+                微信进入 / 授权
+              </a>
+              <p className="auth-method-note">适合已经在微信里绑定过身份的采集员、团长或管理员。</p>
+              <p className="auth-register-prompt">
+                第一次来平台？<Link href="/register">先注册采集员账号</Link>
+              </p>
+            </div>
+          ) : null}
+
+          {loginMethod === "phone" ? (
+            <form className="auth-gateway-form" onSubmit={handleSubmit}>
+              <div className="field">
+                <label htmlFor="phone">手机号</label>
+                <input
+                  id="phone"
+                  inputMode="numeric"
+                  maxLength={11}
+                  placeholder="请输入 11 位大陆手机号"
+                  value={phone}
+                  onChange={(event) => setPhone(event.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="password">密码</label>
+                <input
+                  id="password"
+                  minLength={6}
+                  placeholder="请输入密码"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+              </div>
+
+              <label className="auth-compact-agreement">
+                <input
+                  checked={agreementAccepted}
+                  onChange={(event) => handleAgreementToggle(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  我已阅读并同意
+                  <button className="agreement-text-button" onClick={() => setAgreementDialogOpen(true)} type="button">
+                    《{legalDeclarationTitle}》
+                  </button>
+                </span>
+              </label>
+
+              <button className="submit-button auth-gateway-submit" disabled={submitting} type="submit">
+                {submitting ? "提交中..." : "登录"}
+              </button>
+
+              <p className="auth-register-prompt">
+                没有账号？<Link href="/register">去注册采集员账号</Link>
+              </p>
+            </form>
+          ) : null}
 
           {message ? (
             <p aria-live="polite" className="auth-message auth-gateway-message">

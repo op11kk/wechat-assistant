@@ -484,6 +484,40 @@ a {
   line-height: 1.7;
 }
 
+.auth-method-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 24px;
+  padding: 6px;
+  border: 1px solid rgba(5, 5, 5, 0.1);
+  border-radius: 22px;
+  background: #f6f6f4;
+}
+
+.auth-method-tab {
+  min-height: 46px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 850;
+  line-height: 1.1;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.auth-method-tab.is-active {
+  background: var(--ink);
+  color: #ffffff;
+  box-shadow: 0 10px 24px rgba(5, 5, 5, 0.14);
+}
+
 .auth-gateway-toggle {
   display: grid;
   grid-template-columns: 0.75fr 1.25fr;
@@ -599,6 +633,22 @@ a {
   display: grid;
   gap: 20px;
   margin-top: 28px;
+}
+
+.auth-register-prompt {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.auth-register-prompt a {
+  color: var(--brand-dark);
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .auth-code-row {
